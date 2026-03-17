@@ -69,11 +69,11 @@ const TOOL_TO_FILE_ACTION: Record<string, FileAction> = {
 }
 
 function extractFilePath(input: Record<string, unknown>): string {
-  return String(input.path ?? input.file_path ?? input.filename ?? input.file ?? input.target ?? input.source ?? '')
+  return String(input.path ?? input.filePath ?? input.file_path ?? input.filename ?? input.file ?? input.target ?? input.source ?? '')
 }
 
 function extractNewPath(input: Record<string, unknown>): string {
-  return String(input.new_path ?? input.destination ?? input.target ?? input.newPath ?? '')
+  return String(input.new_path ?? input.newFilePath ?? input.destination ?? input.target ?? input.newPath ?? '')
 }
 
 // ── SSE Connection (one per project directory) ───────────────────────
@@ -145,6 +145,7 @@ class SSEConnection {
   disconnect() {
     this.controller?.abort()
     this.controller = null
+    this.partTypes.clear()
     this.eventBuffer.clear()
     for (const timer of this.idleTimers.values()) clearTimeout(timer)
     this.idleTimers.clear()
@@ -152,18 +153,20 @@ class SSEConnection {
 
   private async consumeStream(signal: AbortSignal) {
     while (!signal.aborted) {
-      this.partTypes.clear()
       try {
         const url = `${this.baseUrl}/event`
+        console.log('[OpenCode] Connecting to SSE event stream:', url)
         const response = await fetch(url, {
           headers: { Accept: 'text/event-stream' },
           signal,
         })
 
         if (!response.ok || !response.body) {
+          console.error('[OpenCode] SSE connection failed: status', response.status)
           await this.delay(2000, signal)
           continue
         }
+        console.log('[OpenCode] SSE event stream connected')
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
@@ -193,10 +196,12 @@ class SSEConnection {
             }
           }
         }
-      } catch {
+      } catch (err) {
         if (signal.aborted) return
+        console.error('[OpenCode] SSE stream error, reconnecting in 2s:', err instanceof Error ? err.message : err)
       }
 
+      console.log('[OpenCode] SSE stream disconnected, reconnecting in 2s...')
       await this.delay(2000, signal)
     }
   }
@@ -212,6 +217,7 @@ class SSEConnection {
     // Auto-approve permission requests so tool calls (write, edit, etc.) aren't blocked
     if (event.type === 'permission.updated') {
       const props = event.properties as { id?: string; sessionID?: string }
+      console.log('[OpenCode] Permission event:', event.type, 'id:', props.id, 'session:', props.sessionID)
       if (props.id && props.sessionID) {
         this.approvePermission(props.sessionID, props.id)
       }
@@ -296,6 +302,7 @@ class SSEConnection {
           if (sessionId) this.cancelIdleComplete(sessionId)
           events.push({ type: 'status', status: 'running' })
         } else if (statusType === 'idle') {
+          if (sessionId) this.scheduleIdleComplete(sessionId)
           events.push({ type: 'status', status: 'idle' })
         }
         return { sessionId, streamEvents: events }
@@ -364,9 +371,6 @@ class SSEConnection {
         if (props.info?.error) {
           events.push({ type: 'error', message: props.info.error.data?.message ?? 'Unknown error' })
         }
-        if (props.info?.role === 'assistant' && props.info?.time?.completed) {
-          if (sessionId) this.scheduleIdleComplete(sessionId)
-        }
         return { sessionId, streamEvents: events }
       }
 
@@ -382,24 +386,30 @@ class SSEConnection {
   }
 
   private approvePermission(sessionId: string, permissionId: string) {
+    console.log('[OpenCode] Attempting to approve permission:', permissionId, 'for session:', sessionId)
     fetch(`${this.baseUrl}/session/${sessionId}/permissions/${permissionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ response: 'always' }),
       signal: AbortSignal.timeout(5000),
-    }).catch(() => { /* ignore approval errors */ })
+    }).catch((err) => {
+      console.error('[OpenCode] Permission approval failed:', permissionId, err instanceof Error ? err.message : err)
+    })
   }
 
   private scheduleIdleComplete(sessionId: string) {
     this.cancelIdleComplete(sessionId)
+    console.log('[OpenCode] Scheduling idle complete for session:', sessionId, '(30s timer)')
     // Primary completion mechanism: schedule a debounced complete event.
     // If another step starts (session.status: busy), the timer is cancelled.
-    // 10s is long enough to cover gaps between multi-step tool calls,
-    // but short enough that users don't wait long after the task finishes.
+    // 30s is long enough to cover gaps between multi-step tool calls
+    // (plugin creation can have long pauses between steps),
+    // while still completing reasonably quickly after the task finishes.
     const timer = setTimeout(() => {
       this.idleTimers.delete(sessionId)
+      console.log('[OpenCode] Idle timer fired for session:', sessionId, '— dispatching complete')
       this.dispatchToSession(sessionId, { type: 'complete' })
-    }, 10_000)
+    }, 30_000)
     this.idleTimers.set(sessionId, timer)
   }
 
@@ -414,6 +424,16 @@ class SSEConnection {
   clearBuffer(sessionId: string) {
     this.eventBuffer.delete(sessionId)
     this.cancelIdleComplete(sessionId)
+  }
+
+  dispatchComplete(sessionId: string) {
+    this.cancelIdleComplete(sessionId)
+    console.log('[OpenCode] Dispatching complete for session:', sessionId)
+    this.dispatchToSession(sessionId, { type: 'complete' })
+  }
+
+  dispatchError(sessionId: string, message: string) {
+    this.dispatchToSession(sessionId, { type: 'error', message })
   }
 
   private dispatchToSession(sessionId: string, event: StreamEvent) {
@@ -529,6 +549,16 @@ export class SubscriptionManager {
   clearBuffer(directory: string, sessionId: string) {
     const conn = this.connections.get(directory)
     if (conn) conn.clearBuffer(sessionId)
+  }
+
+  dispatchComplete(directory: string, sessionId: string) {
+    const conn = this.connections.get(directory)
+    if (conn) conn.dispatchComplete(sessionId)
+  }
+
+  dispatchError(directory: string, sessionId: string, message: string) {
+    const conn = this.connections.get(directory)
+    if (conn) conn.dispatchError(sessionId, message)
   }
 }
 
@@ -646,6 +676,7 @@ export class OpenCodeBridge implements BridgeInterface {
         }
       }
 
+      console.log('[OpenCode] Starting stream for session:', task.sessionId, 'project:', task.projectId)
       onEvent({ type: 'status', content: 'Connecting to OpenCode...', timestamp: new Date().toISOString() })
 
       const directory = task.context?.projectDirectory ?? '.'
@@ -663,18 +694,24 @@ export class OpenCodeBridge implements BridgeInterface {
       // Subscribe to events for real-time forwarding + completion detection
       const collectedText: string[] = []
       const thinkingParts = new Map<string, { content: string; done: boolean }>()
-      const fileParts: MessagePart[] = []
+      const filePartsById = new Map<string, { action: string; path: string; newPath?: string; tool: string }>()
+      const seenParts = new Set<string>()
+      const orderedRefs: Array<{ type: 'thinking' | 'file' | 'tool'; id: string }> = []
       let latestTodos: TodoItem[] = []
       let resolved = false
 
-      const completionPromise = new Promise<void>((resolve, reject) => {
+      let timedOut = false
+      let lastEventTime = Date.now()
+
+      const completionPromise = new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
-          if (!resolved) { resolved = true; reject(new Error('Session timed out after 5 minutes')) }
-        }, 300000)
+          if (!resolved) { resolved = true; timedOut = true; unsub?.(); resolve() }
+        }, 1800000)
 
         let unsub: (() => void) | null = null
         unsub = this.subscriptionManager.subscribe(directory, opencodeSessionId, (event) => {
           if (controller.signal.aborted || resolved) return
+          lastEventTime = Date.now()
 
           switch (event.type) {
             case 'text-delta':
@@ -687,17 +724,25 @@ export class OpenCodeBridge implements BridgeInterface {
               existing.content += event.content
               existing.done = event.done
               thinkingParts.set(event.id, existing)
+              if (!seenParts.has(event.id)) {
+                seenParts.add(event.id)
+                orderedRefs.push({ type: 'thinking', id: event.id })
+              }
               onEvent({ type: 'thinking', content: event.content, timestamp: new Date().toISOString() })
               break
             }
 
             case 'file-op': {
-              if ((event.status === 'completed' || event.status === 'error') && event.action !== 'tool') {
-                fileParts.push({
-                  type: 'file',
-                  action: event.action as 'create' | 'update' | 'delete' | 'rename' | 'read',
+              if (!seenParts.has(event.id)) {
+                seenParts.add(event.id)
+                orderedRefs.push({ type: event.action === 'tool' ? 'tool' : 'file', id: event.id })
+              }
+              if (event.status === 'completed' || event.status === 'error') {
+                filePartsById.set(event.id, {
+                  action: event.action,
                   path: event.path,
                   newPath: event.newPath,
+                  tool: event.tool,
                 })
               }
               const verb = event.status === 'running'
@@ -748,22 +793,115 @@ export class OpenCodeBridge implements BridgeInterface {
             resolved = true
             clearTimeout(timeout)
             unsub?.()
-            reject(new Error('Execution cancelled'))
+            resolve()
           }
         }, { once: true })
       })
 
       // Build context prompt and send to OpenCode
       const contextPrompt = this.buildContextPrompt(task)
+
+      // Get baseline assistant message count before sending prompt
+      // so pollUntilIdle only considers NEW messages for completion
+      let baselineAssistantCount = 0
+      try {
+        const msgRes = await fetch(`${this.baseUrl}/session/${opencodeSessionId}/message`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5000),
+        })
+        if (msgRes.ok) {
+          const existingMessages = (await msgRes.json()) as OpenCodeMessage[]
+          baselineAssistantCount = existingMessages.filter((m) => m.info?.role === 'assistant').length
+        }
+      } catch {
+        // If we can't determine baseline, set high so poll waits for SSE-based completion instead
+        baselineAssistantCount = Number.MAX_SAFE_INTEGER
+      }
+
+      console.log('[OpenCode] Sending prompt to session:', opencodeSessionId, 'baseline msgs:', baselineAssistantCount)
       await this.sendPromptAsync(opencodeSessionId, contextPrompt, task.context?.model)
+      console.log('[OpenCode] Prompt sent successfully')
+
+      // Start permission polling to detect stuck permissions
+      const permAbort = new AbortController()
+      controller.signal.addEventListener('abort', () => permAbort.abort(), { once: true })
+      this.pollPermissions(opencodeSessionId, permAbort.signal)
+
+      // Monitor for stuck operations — warn user if no events for 3 minutes
+      const progressChecker = setInterval(() => {
+        if (resolved || controller.signal.aborted) {
+          clearInterval(progressChecker)
+          return
+        }
+        const elapsed = Date.now() - lastEventTime
+        if (elapsed > 180000) {
+          const stuckMsg = 'No progress detected for 3 minutes — the operation may be stuck. You can cancel and retry.'
+          onEvent({ type: 'error', content: stuckMsg, timestamp: new Date().toISOString() })
+          this.subscriptionManager.dispatchError(directory, opencodeSessionId, stuckMsg)
+          lastEventTime = Date.now()
+        }
+      }, 60000)
 
       // Wait for completion via SSE events, with polling fallback
-      const pollFallback = this.pollUntilIdle(opencodeSessionId, controller.signal)
+      const pollFallback = this.pollUntilIdle(opencodeSessionId, controller.signal, baselineAssistantCount)
       await Promise.race([completionPromise, pollFallback]).catch(() => {})
+      clearInterval(progressChecker)
 
-      // If still not resolved, give a brief window then proceed
+      // Stop permission polling once the main stream completes
+      permAbort.abort()
+
+      // Handle timeout — return failure instead of silently succeeding
+      if (timedOut) {
+        this.subscriptionManager.dispatchComplete(directory, opencodeSessionId)
+        onEvent({ type: 'error', content: 'Session timed out — the AI agent may still be working in the background. You can send a new message to check.', timestamp: new Date().toISOString() })
+        onEvent({ type: 'complete', content: 'Timed out', timestamp: new Date().toISOString() })
+        const partialText = await this.fetchAssistantText(opencodeSessionId)
+
+        // Assemble partial metadata so file-op badges are preserved
+        const timeoutParts: MessagePart[] = []
+        for (const ref of orderedRefs) {
+          if (ref.type === 'thinking') {
+            const t = thinkingParts.get(ref.id)
+            if (t) timeoutParts.push({ type: 'thinking', content: t.content })
+          } else {
+            const fp = filePartsById.get(ref.id)
+            if (fp) {
+              if (fp.action === 'tool') {
+                timeoutParts.push({ type: 'tool', tool: fp.tool, path: fp.path })
+              } else {
+                timeoutParts.push({
+                  type: 'file',
+                  action: fp.action as 'create' | 'update' | 'delete' | 'rename' | 'read',
+                  path: fp.path,
+                  newPath: fp.newPath,
+                })
+              }
+            }
+          }
+        }
+
+        return {
+          success: false,
+          output: partialText || collectedText.join(''),
+          error: 'Session timed out after 30 minutes',
+          metadata: {
+            opencodeSessionId,
+            parts: timeoutParts.length > 0 ? timeoutParts : undefined,
+          },
+        }
+      }
+
+      // Handle abort/cancellation
+      if (controller.signal.aborted) {
+        return { success: false, output: '', error: 'Execution cancelled', metadata: { opencodeSessionId } }
+      }
+
+      // If poll fallback resolved but SSE hasn't sent 'complete' yet,
+      // dispatch it now so the frontend SSE listener gets the signal promptly
       if (!resolved) {
-        await new Promise((r) => setTimeout(r, 1000))
+        console.log('[OpenCode] Poll fallback resolved before SSE complete — dispatching complete for:', opencodeSessionId)
+        resolved = true
+        this.subscriptionManager.dispatchComplete(directory, opencodeSessionId)
       }
 
       onEvent({ type: 'status', content: 'AI agent completed. Processing response...', timestamp: new Date().toISOString() })
@@ -771,15 +909,32 @@ export class OpenCodeBridge implements BridgeInterface {
       // Fetch full messages from OpenCode for accurate persistence
       const fullText = await this.fetchAssistantText(opencodeSessionId)
       const outputText = fullText || collectedText.join('')
+      console.log('[OpenCode] Stream complete for session:', opencodeSessionId, 'text length:', outputText.length, 'parts:', orderedRefs.length)
 
       onEvent({ type: 'complete', content: 'Done', timestamp: new Date().toISOString() })
 
       // Assemble metadata parts
       const parts: MessagePart[] = []
-      for (const [, thinking] of thinkingParts) {
-        parts.push({ type: 'thinking', content: thinking.content })
+      for (const ref of orderedRefs) {
+        if (ref.type === 'thinking') {
+          const t = thinkingParts.get(ref.id)
+          if (t) parts.push({ type: 'thinking', content: t.content })
+        } else {
+          const fp = filePartsById.get(ref.id)
+          if (fp) {
+            if (fp.action === 'tool') {
+              parts.push({ type: 'tool', tool: fp.tool, path: fp.path })
+            } else {
+              parts.push({
+                type: 'file',
+                action: fp.action as 'create' | 'update' | 'delete' | 'rename' | 'read',
+                path: fp.path,
+                newPath: fp.newPath,
+              })
+            }
+          }
+        }
       }
-      parts.push(...fileParts)
       if (latestTodos.length > 0) {
         parts.push({ type: 'todo-list', items: latestTodos })
       }
@@ -797,6 +952,7 @@ export class OpenCodeBridge implements BridgeInterface {
         return { success: false, output: '', error: 'Execution cancelled' }
       }
       const msg = err instanceof Error ? err.message : 'Unknown error'
+      console.error('[OpenCode] Bridge error for session:', task.sessionId, msg)
       return { success: false, output: '', error: `OpenCode bridge error: ${msg}` }
     } finally {
       this.activeSessions.delete(task.sessionId)
@@ -811,11 +967,45 @@ export class OpenCodeBridge implements BridgeInterface {
     }
   }
 
+  async deleteSession(opencodeSessionId: string): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl}/session/${opencodeSessionId}`, {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch { /* best-effort cleanup */ }
+  }
+
   // ── Private helpers ──────────────────────────────────────────────
 
-  private async pollUntilIdle(sessionId: string, signal: AbortSignal): Promise<void> {
+  private async pollPermissions(sessionId: string, signal: AbortSignal): Promise<void> {
+    // Diagnostic: periodically check for pending permissions that may block tool execution
+    while (!signal.aborted) {
+      await new Promise((r) => setTimeout(r, 10000))
+      if (signal.aborted) return
+      try {
+        const res = await fetch(`${this.baseUrl}/permission`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5000),
+        })
+        if (res.ok) {
+          const permissions = (await res.json()) as Array<{ id?: string; sessionID?: string; permission?: string; metadata?: Record<string, unknown> }>
+          const pending = permissions.filter((p) => p.sessionID === sessionId)
+          if (pending.length > 0) {
+            console.warn('[OpenCode] ⚠ STUCK PERMISSION DETECTED for session:', sessionId,
+              pending.map((p) => `${p.permission} (${p.id})`).join(', '))
+          }
+        }
+      } catch { /* ignore polling errors */ }
+    }
+  }
+
+  private async pollUntilIdle(sessionId: string, signal: AbortSignal, baselineAssistantCount: number): Promise<void> {
     // Initial delay before polling starts
     await new Promise((r) => setTimeout(r, 5000))
+
+    let quietSince = 0
+    let lastSeenCount = baselineAssistantCount
 
     while (!signal.aborted) {
       try {
@@ -825,8 +1015,24 @@ export class OpenCodeBridge implements BridgeInterface {
         })
         if (res.ok) {
           const messages = (await res.json()) as OpenCodeMessage[]
-          const lastAssistant = [...messages].reverse().find((m) => m.info?.role === 'assistant')
-          if (lastAssistant?.info?.time?.completed) return
+          const assistantMessages = messages.filter((m) => m.info?.role === 'assistant')
+          if (assistantMessages.length > baselineAssistantCount) {
+            // Reset quiet timer when new messages appear (new step started)
+            if (assistantMessages.length !== lastSeenCount) {
+              lastSeenCount = assistantMessages.length
+              quietSince = 0
+            }
+            const lastAssistant = assistantMessages[assistantMessages.length - 1]
+            if (lastAssistant?.info?.time?.completed) {
+              if (quietSince === 0) {
+                quietSince = Date.now()
+              } else if (Date.now() - quietSince >= 15000) {
+                return
+              }
+            } else {
+              quietSince = 0
+            }
+          }
         }
       } catch { /* ignore polling errors */ }
 

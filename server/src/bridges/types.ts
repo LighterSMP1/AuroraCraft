@@ -25,6 +25,7 @@ export interface BridgeStreamEvent {
 export type MessagePart =
   | { type: 'thinking'; content: string }
   | { type: 'file'; action: 'create' | 'update' | 'delete' | 'rename' | 'read'; path: string; newPath?: string }
+  | { type: 'tool'; tool: string; path: string }
   | { type: 'todo-list'; items: TodoItem[] }
 
 export interface TodoItem {

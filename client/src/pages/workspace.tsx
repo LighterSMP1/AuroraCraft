@@ -143,6 +143,16 @@ function ThinkingBadge({ content, defaultExpanded = false }: { content: string; 
   )
 }
 
+function ToolBadge({ part }: { part: Extract<MessagePart, { type: 'tool' }> }) {
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/10 px-2 py-1 text-xs text-primary">
+      <Cpu className="h-3 w-3" />
+      <span className="font-medium">Ran</span>
+      <span className="opacity-75">{part.tool}</span>
+    </div>
+  )
+}
+
 function TodoListBadge({ items }: { items: TodoItem[] }) {
   const allDone = items.length > 0 && items.every((i) => i.status === 'completed')
   const [expanded, setExpanded] = useState(!allDone)
@@ -298,6 +308,25 @@ function StreamingTodoList({ items }: { items: StreamTodoItem[] }) {
 function StreamingMessage({ state }: { state: StreamingState }) {
   const hasContent = state.thinkingBlocks.length > 0 || state.fileOps.length > 0 || state.text.length > 0 || state.todos.length > 0
 
+  const allParts = [
+    ...state.thinkingBlocks.map((block) => ({ kind: 'thinking' as const, block, order: block.order })),
+    ...state.fileOps.map((op) => ({ kind: 'file-op' as const, op, order: op.order })),
+  ].sort((a, b) => a.order - b.order)
+
+  const groups: Array<{ kind: 'thinking'; block: ThinkingBlock } | { kind: 'file-ops'; ops: FileOpBlock[] }> = []
+  for (const part of allParts) {
+    if (part.kind === 'thinking') {
+      groups.push({ kind: 'thinking', block: part.block })
+    } else {
+      const last = groups[groups.length - 1]
+      if (last && last.kind === 'file-ops') {
+        last.ops.push(part.op)
+      } else {
+        groups.push({ kind: 'file-ops', ops: [part.op] })
+      }
+    }
+  }
+
   return (
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-hover">
@@ -306,16 +335,12 @@ function StreamingMessage({ state }: { state: StreamingState }) {
       <div className="min-w-0 flex-1 space-y-2">
         <p className="text-xs font-medium text-text-muted">AI Agent</p>
 
-        {state.thinkingBlocks.map((block) => (
-          <StreamingThinkingBadge key={block.id} block={block} />
-        ))}
-
-        {state.fileOps.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {state.fileOps.map((op) => (
-              <StreamingFileOpBadge key={op.id} op={op} />
-            ))}
-          </div>
+        {groups.map((group, i) =>
+          group.kind === 'thinking'
+            ? <StreamingThinkingBadge key={group.block.id} block={group.block} />
+            : <div key={`ops-${i}`} className="flex flex-wrap gap-1.5">
+                {group.ops.map((op) => <StreamingFileOpBadge key={op.id} op={op} />)}
+              </div>
         )}
 
         {state.text && <MarkdownContent content={state.text} />}
@@ -338,32 +363,66 @@ function StreamingMessage({ state }: { state: StreamingState }) {
 function MessageContent({ message }: { message: AgentMessage }) {
   const rawParts = message.metadata?.parts
   const parts = Array.isArray(rawParts) ? rawParts : []
-  const hasRichParts = parts.length > 0
+
+  if (parts.length > 0) {
+    const groups: Array<
+      | { kind: 'thinking'; content: string; idx: number }
+      | { kind: 'file-group'; items: Array<{ part: MessagePart; idx: number }> }
+      | { kind: 'todo'; items: TodoItem[]; idx: number }
+    > = []
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
+      if (part.type === 'thinking') {
+        groups.push({ kind: 'thinking', content: part.content, idx: i })
+      } else if (part.type === 'file' || part.type === 'tool') {
+        const last = groups[groups.length - 1]
+        if (last && last.kind === 'file-group') {
+          last.items.push({ part, idx: i })
+        } else {
+          groups.push({ kind: 'file-group', items: [{ part, idx: i }] })
+        }
+      } else if (part.type === 'todo-list') {
+        groups.push({ kind: 'todo', items: part.items, idx: i })
+      }
+    }
+
+    return (
+      <div className="mt-0.5 space-y-2">
+        {groups.map((group) => {
+          if (group.kind === 'thinking') {
+            return <ThinkingBadge key={`think-${group.idx}`} content={group.content} />
+          }
+          if (group.kind === 'file-group') {
+            return (
+              <div key={`fg-${group.items[0].idx}`} className="flex flex-wrap gap-1.5">
+                {group.items.map(({ part, idx }) => {
+                  if (part.type === 'file') return <FileOpBadge key={`file-${idx}`} part={part} />
+                  if (part.type === 'tool') return <ToolBadge key={`tool-${idx}`} part={part} />
+                  return null
+                })}
+              </div>
+            )
+          }
+          return <TodoListBadge key={`todo-${group.idx}`} items={group.items} />
+        })}
+
+        {message.content && (
+          message.role === 'agent'
+            ? <MarkdownContent content={message.content} />
+            : <p className="whitespace-pre-wrap text-sm text-text">{message.content}</p>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="mt-0.5 space-y-2">
-      {hasRichParts && parts.filter((p): p is Extract<MessagePart, { type: 'thinking' }> => p.type === 'thinking').map((p, i) => (
-        <ThinkingBadge key={`think-${i}`} content={p.content} />
-      ))}
-
       {message.content && (
         message.role === 'agent'
           ? <MarkdownContent content={message.content} />
           : <p className="whitespace-pre-wrap text-sm text-text">{message.content}</p>
       )}
-
-      {hasRichParts && (() => {
-        const fileParts = parts.filter((p): p is Extract<MessagePart, { type: 'file' }> => p.type === 'file')
-        return fileParts.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5">
-            {fileParts.map((p, i) => <FileOpBadge key={`file-${i}`} part={p} />)}
-          </div>
-        ) : null
-      })()}
-
-      {hasRichParts && parts.filter((p): p is Extract<MessagePart, { type: 'todo-list' }> => p.type === 'todo-list').map((p, i) => (
-        <TodoListBadge key={`todo-${i}`} items={p.items} />
-      ))}
     </div>
   )
 }

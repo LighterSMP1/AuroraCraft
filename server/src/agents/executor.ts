@@ -75,11 +75,13 @@ export class AgentExecutor {
         const error = result.error ?? 'Bridge execution failed'
         await this.failSession(context.sessionId, error)
 
-        // Save error as agent message so user sees it in chat
+        // Save agent message: include partial output if available (e.g. timeout with partial work)
+        const partialOutput = result.output ? `${result.output}\n\n⚠️ ${error}` : `⚠️ ${error}`
         await db.insert(agentMessages).values({
           sessionId: context.sessionId,
           role: 'agent',
-          content: `⚠️ ${error}`,
+          content: partialOutput,
+          metadata: result.metadata?.parts ? { parts: result.metadata.parts } : undefined,
         })
 
         callbacks.onError(error)

@@ -6,7 +6,9 @@ import { mkdir, readdir } from 'fs/promises'
 import path from 'path'
 import { db } from '../db/index.js'
 import { projects } from '../db/schema/projects.js'
+import { agentSessions } from '../db/schema/agent-sessions.js'
 import { authMiddleware } from '../middleware/auth.js'
+import { opencodeBridge } from '../bridges/index.js'
 
 const createProjectSchema = z.object({
   name: z.string().min(2).max(128),
@@ -176,6 +178,22 @@ export async function projectRoutes(app: FastifyInstance) {
 
     if (!existing) {
       return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    // Clean up OpenCode sessions before deleting the project
+    const sessions = await db
+      .select({ opencodeSessionId: agentSessions.opencodeSessionId })
+      .from(agentSessions)
+      .where(eq(agentSessions.projectId, id))
+
+    const ocSessionIds = sessions
+      .map((s) => s.opencodeSessionId)
+      .filter((ocId): ocId is string => !!ocId)
+
+    if (ocSessionIds.length > 0) {
+      await Promise.allSettled(
+        ocSessionIds.map((ocId) => opencodeBridge.deleteSession(ocId)),
+      )
     }
 
     await db.delete(projects).where(eq(projects.id, id))

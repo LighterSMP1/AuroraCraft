@@ -107,6 +107,7 @@ interface StreamAccumulator {
   isStreaming: boolean
   completed: boolean
   fileChanges: string[]
+  nextOrder: number
 }
 
 function createEmptyAccumulator(): StreamAccumulator {
@@ -118,6 +119,7 @@ function createEmptyAccumulator(): StreamAccumulator {
     isStreaming: false,
     completed: false,
     fileChanges: [],
+    nextOrder: 0,
   }
 }
 
@@ -157,12 +159,14 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
           id: event.id,
           content: event.content,
           done: event.done,
+          order: acc.nextOrder++,
         })
       }
       break
     }
 
-    case 'file-op':
+    case 'file-op': {
+      const existingOp = acc.fileOps.get(event.id)
       acc.fileOps.set(event.id, {
         id: event.id,
         action: event.action,
@@ -170,8 +174,10 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
         newPath: event.newPath,
         status: event.status,
         tool: event.tool,
+        order: existingOp?.order ?? acc.nextOrder++,
       })
       break
+    }
 
     case 'todo':
       acc.todos = event.items
