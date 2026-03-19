@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { eq, and, desc } from 'drizzle-orm'
 import crypto from 'crypto'
-import { mkdir, readdir } from 'fs/promises'
+import { mkdir, readdir, rm } from 'fs/promises'
 import path from 'path'
 import { db } from '../db/index.js'
 import { projects } from '../db/schema/projects.js'
@@ -171,7 +171,7 @@ export async function projectRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string }
 
     const [existing] = await db
-      .select({ id: projects.id })
+      .select({ id: projects.id, linkId: projects.linkId })
       .from(projects)
       .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
       .limit(1)
@@ -197,6 +197,15 @@ export async function projectRoutes(app: FastifyInstance) {
     }
 
     await db.delete(projects).where(eq(projects.id, id))
+
+    // Clean up project directory (non-blocking)
+    if (existing.linkId) {
+      const username = request.user!.username
+      const projectDir = `/home/auroracraft-${username}/${existing.linkId}`
+      rm(projectDir, { recursive: true, force: true }).catch((err) => {
+        app.log.warn({ err, projectDir }, 'Failed to remove project directory')
+      })
+    }
 
     return reply.status(204).send()
   })

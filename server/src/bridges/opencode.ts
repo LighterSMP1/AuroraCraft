@@ -228,9 +228,10 @@ class SSEConnection {
 
     for (const streamEvent of streamEvents) {
       if (sessionId) {
-        // Buffer non-terminal events for late-joining listeners (e.g. SSE endpoint)
+        // Buffer non-terminal, non-transient events for late-joining listeners (e.g. SSE endpoint)
         // 'complete' is a terminal signal that should only be dispatched live, never replayed
-        if (streamEvent.type !== 'complete') {
+        // 'file-op' events are transient UI indicators and must not be replayed to avoid ghost badges
+        if (streamEvent.type !== 'complete' && streamEvent.type !== 'file-op') {
           let buffer = this.eventBuffer.get(sessionId)
           if (!buffer) {
             buffer = []
@@ -437,8 +438,8 @@ class SSEConnection {
   }
 
   private dispatchToSession(sessionId: string, event: StreamEvent) {
-    // Buffer non-terminal events for late-joining listeners
-    if (event.type !== 'complete') {
+    // Buffer non-terminal, non-transient events for late-joining listeners
+    if (event.type !== 'complete' && event.type !== 'file-op') {
       let buffer = this.eventBuffer.get(sessionId)
       if (!buffer) {
         buffer = []

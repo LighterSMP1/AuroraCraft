@@ -77,6 +77,14 @@ export function useAgentSession(projectId: string, sessionId: string) {
     },
   })
 
+  const cancelSessionMutation = useMutation({
+    mutationFn: () =>
+      api.post<AgentSession>(`/projects/${projectId}/agent/sessions/${sessionId}/cancel`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects', projectId, 'agent', 'sessions', sessionId] })
+    },
+  })
+
   return {
     session: session ?? null,
     messages: session?.messages ?? [],
@@ -85,6 +93,8 @@ export function useAgentSession(projectId: string, sessionId: string) {
     isSending: sendMessageMutation.isPending,
     sendError: sendMessageMutation.error,
     invalidateAndRefetch,
+    cancelSession: cancelSessionMutation.mutateAsync,
+    isCancelling: cancelSessionMutation.isPending,
   }
 }
 
@@ -104,6 +114,12 @@ export function useAgentLogs(projectId: string, sessionId: string) {
 
 // ── Mutable accumulator for streaming events (not React state) ───────
 
+interface PendingTransition {
+  id: string
+  status: 'completed' | 'error'
+  at: number
+}
+
 interface StreamAccumulator {
   items: StreamingItem[]
   itemById: Map<string, StreamingItem>
@@ -112,6 +128,8 @@ interface StreamAccumulator {
   completed: boolean
   fileChanges: string[]
   nextOrder: number
+  pendingTransitions: PendingTransition[]
+  activeStream: boolean
 }
 
 function createEmptyAccumulator(): StreamAccumulator {
@@ -123,10 +141,21 @@ function createEmptyAccumulator(): StreamAccumulator {
     completed: false,
     fileChanges: [],
     nextOrder: 0,
+    pendingTransitions: [],
+    activeStream: false,
   }
 }
 
 function snapshotAccumulator(acc: StreamAccumulator): StreamingState {
+  const now = Date.now()
+  for (let i = acc.pendingTransitions.length - 1; i >= 0; i--) {
+    const t = acc.pendingTransitions[i]
+    if (now >= t.at) {
+      const item = acc.itemById.get(t.id)
+      if (item && item.kind === 'file-op') item.fileStatus = t.status
+      acc.pendingTransitions.splice(i, 1)
+    }
+  }
   return {
     items: acc.items.filter(item => item.kind !== 'text' || item.textContent),
     todos: acc.todos,
@@ -183,6 +212,7 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
     }
 
     case 'file-op': {
+      if (!acc.activeStream) break
       const existing = acc.itemById.get(event.id)
       if (existing && existing.kind === 'file-op') {
         existing.fileAction = event.action
@@ -191,6 +221,7 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
         existing.fileStatus = event.status
         existing.fileTool = event.tool
       } else {
+        const showRunning = event.status === 'completed' || event.status === 'error'
         const item: StreamingItem = {
           id: event.id,
           kind: 'file-op',
@@ -198,11 +229,14 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
           fileAction: event.action,
           filePath: event.path,
           fileNewPath: event.newPath,
-          fileStatus: event.status,
+          fileStatus: showRunning ? 'running' : event.status,
           fileTool: event.tool,
         }
         acc.items.push(item)
         acc.itemById.set(item.id, item)
+        if (showRunning) {
+          acc.pendingTransitions.push({ id: event.id, status: event.status as 'completed' | 'error', at: Date.now() + 600 })
+        }
       }
       break
     }
@@ -214,6 +248,7 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
     case 'status':
       if (event.status === 'running' && !acc.completed) {
         acc.isStreaming = true
+        acc.activeStream = true
       }
       break
 
@@ -226,6 +261,7 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
     case 'complete':
       acc.isStreaming = false
       acc.completed = true
+      acc.activeStream = false
       break
 
     case 'error':
@@ -245,7 +281,8 @@ export function useStreamingAgent(projectId: string, sessionId: string, isActive
     if (!isActive) return
 
     const interval = setInterval(() => {
-      if (dirtyRef.current) {
+      const hasDueTransitions = accRef.current.pendingTransitions.some(t => Date.now() >= t.at)
+      if (dirtyRef.current || hasDueTransitions) {
         dirtyRef.current = false
         setSnapshot(snapshotAccumulator(accRef.current))
       }

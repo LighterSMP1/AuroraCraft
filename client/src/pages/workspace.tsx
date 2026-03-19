@@ -16,6 +16,7 @@ import {
   Play,
   Settings,
   Send,
+  Square,
   MessageSquare,
   Bot,
   User,
@@ -371,13 +372,6 @@ function StreamingMessage({ state }: { state: StreamingState }) {
         ) : (
           <div className="flex items-center gap-2">
             <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-            <span className="text-xs text-text-dim">AI is thinking...</span>
-          </div>
-        )}
-
-        {!hasContent && (
-          <div className="flex items-center gap-2">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
             <span className="text-xs text-text-dim">Connecting to AI agent...</span>
           </div>
         )}
@@ -425,9 +419,7 @@ function MessageContent({ message }: { message: AgentMessage }) {
             return <ThinkingBadge key={`think-${group.idx}`} content={group.content} />
           }
           if (group.kind === 'text') {
-            return message.role === 'agent'
-              ? <MarkdownContent key={`text-${group.idx}`} content={group.content} />
-              : <p key={`text-${group.idx}`} className="whitespace-pre-wrap text-sm text-text">{group.content}</p>
+            return <MarkdownContent key={`text-${group.idx}`} content={group.content} />
           }
           if (group.kind === 'file-group') {
             return (
@@ -448,11 +440,7 @@ function MessageContent({ message }: { message: AgentMessage }) {
 
   return (
     <div className="mt-0.5 space-y-2">
-      {message.content && (
-        message.role === 'agent'
-          ? <MarkdownContent content={message.content} />
-          : <p className="whitespace-pre-wrap text-sm text-text">{message.content}</p>
-      )}
+      {message.content && <MarkdownContent content={message.content} />}
     </div>
   )
 }
@@ -597,20 +585,30 @@ function ChatEmptyState({ onSessionCreated, createSession, selectedModel, onMode
         </div>
       </div>
       <div className="border-t border-border p-3">
-        <div className="flex items-center gap-2">
+        {input.trim() && (
+          <div className="mb-2 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-surface-hover/50 px-3 py-2">
+            <MarkdownContent content={input} />
+          </div>
+        )}
+        <div className="flex items-end gap-2">
           <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} disabled={isCreating} />
-          <input
-            type="text"
+          <textarea
+            rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-            placeholder="Describe your plugin idea..."
+            onChange={(e) => {
+              setInput(e.target.value)
+              e.target.style.height = 'auto'
+              e.target.style.height = `${e.target.scrollHeight}px`
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void handleSend() } }}
+            placeholder="Describe your plugin idea... (Ctrl+Enter to send)"
             disabled={isCreating}
-            className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50 max-h-[120px] overflow-y-auto"
           />
           <button
             onClick={handleSend}
             disabled={!input.trim() || isCreating}
+            title="Send message (Ctrl+Enter)"
             className="rounded-lg bg-primary p-2 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
           >
             {isCreating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
@@ -630,12 +628,13 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
   onModelChange: (modelId: string) => void
   onRefreshFiles?: () => void
 }) {
-  const { session, messages, isLoading, sendMessage, isSending, sendError, invalidateAndRefetch } = useAgentSession(projectId, sessionId)
+  const { session, messages, isLoading, sendMessage, isSending, sendError, invalidateAndRefetch, cancelSession, isCancelling } = useAgentSession(projectId, sessionId)
   const streamActive = !!projectId && !!sessionId && (!session || session.status === 'idle' || session.status === 'running')
   const { streamingState, isConnected, resetStream } = useStreamingAgent(projectId, sessionId, streamActive)
   const [input, setInput] = useState('')
   const [awaitingStream, setAwaitingStream] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingSentRef = useRef(false)
   const prevFileChangesRef = useRef(0)
   const prevCompletedOpsRef = useRef(0)
@@ -684,6 +683,12 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
   }, [awaitingStream, streamingState.isStreaming, streamingState.items.length])
 
   useEffect(() => {
+    if (awaitingStream && session?.status && session.status !== 'idle' && session.status !== 'running') {
+      setAwaitingStream(false)
+    }
+  }, [awaitingStream, session?.status])
+
+  useEffect(() => {
     if (streamingState.fileChanges.length > prevFileChangesRef.current) {
       prevFileChangesRef.current = streamingState.fileChanges.length
       onRefreshFiles?.()
@@ -720,10 +725,13 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
     }
   }, [session?.status, invalidateAndRefetch])
 
+  const isRunning = session?.status === 'running'
+
   const handleSend = useCallback(async () => {
     const trimmed = input.trim()
-    if (!trimmed || isSending) return
+    if (!trimmed || isSending || session?.status === 'running') return
     setInput('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
     setAwaitingStream(true)
     resetStream()
     streamStartMessageCountRef.current = messagesLenRef.current
@@ -735,7 +743,7 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
     } catch {
       setAwaitingStream(false)
     }
-  }, [input, isSending, sendMessage, selectedModel])
+  }, [input, isSending, sendMessage, selectedModel, session?.status])
 
   if (isLoading) {
     return (
@@ -809,24 +817,45 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
             <span className={statusColor}>Session {session.status}</span>
           </div>
         )}
-        <div className="flex items-center gap-2">
+        {input.trim() && (
+          <div className="mb-2 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-surface-hover/50 px-3 py-2">
+            <MarkdownContent content={input} />
+          </div>
+        )}
+        <div className="flex items-end gap-2">
           <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} disabled={isSending || session?.status === 'running'} />
-          <input
-            type="text"
+          <textarea
+            ref={textareaRef}
+            rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-            placeholder="Describe your plugin idea..."
-            disabled={isSending || session?.status === 'running'}
-            className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            onChange={(e) => {
+              setInput(e.target.value)
+              e.target.style.height = 'auto'
+              e.target.style.height = `${e.target.scrollHeight}px`
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void handleSend() } }}
+            placeholder="Describe your plugin idea... (Ctrl+Enter to send)"
+            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary max-h-[120px] overflow-y-auto"
           />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isSending || session?.status === 'running'}
-            className="rounded-lg bg-primary p-2 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
-          >
-            {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </button>
+          {isRunning || awaitingStream ? (
+            <button
+              onClick={() => cancelSession().catch(() => {})}
+              disabled={isCancelling}
+              title="Stop AI"
+              className="rounded-lg bg-destructive p-2 text-destructive-foreground transition-colors hover:bg-destructive/80 disabled:opacity-50"
+            >
+              {isCancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || isSending}
+              title="Send message (Ctrl+Enter)"
+              className="rounded-lg bg-primary p-2 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
+            >
+              {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </button>
+          )}
         </div>
       </div>
     </>

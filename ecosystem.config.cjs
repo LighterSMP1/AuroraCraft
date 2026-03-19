@@ -1,20 +1,15 @@
+const path = require('path')
+
+const ROOT = __dirname
+const LOGS = path.resolve(ROOT, 'logs')
+
 module.exports = {
   apps: [
     {
       name: 'auroracraft-server',
-      cwd: '/workspaces/AuroraCraft',
+      cwd: ROOT,
       script: 'node_modules/.bin/tsx',
       args: 'server/src/index.ts',
-      env: {
-        NODE_ENV: 'production',
-        DATABASE_URL: 'postgresql://auroracraft:auroracraft@localhost:5432/auroracraft',
-        PORT: 3000,
-        HOST: '0.0.0.0',
-        SESSION_SECRET: 'change-me-to-a-random-secret-key-12345',
-        COOKIE_DOMAIN: 'localhost',
-        CLIENT_URL: 'http://localhost:5173',
-        OPENCODE_URL: 'http://localhost:4096',
-      },
       instances: 1,
       autorestart: true,
       watch: false,
@@ -22,8 +17,37 @@ module.exports = {
       wait_ready: false,
       restart_delay: 3000,
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: '/workspaces/AuroraCraft/logs/server-error.log',
-      out_file: '/workspaces/AuroraCraft/logs/server-out.log',
+      error_file: path.resolve(LOGS, 'server-error.log'),
+      out_file: path.resolve(LOGS, 'server-out.log'),
+      merge_logs: true,
+    },
+    {
+      name: 'auroracraft-client',
+      cwd: path.resolve(ROOT, 'client'),
+      script: 'node_modules/.bin/vite',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      restart_delay: 3000,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: path.resolve(LOGS, 'client-error.log'),
+      out_file: path.resolve(LOGS, 'client-out.log'),
+      merge_logs: true,
+    },
+    {
+      name: 'auroracraft-opencode',
+      cwd: ROOT,
+      script: 'opencode',
+      args: 'serve',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '256M',
+      restart_delay: 3000,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: path.resolve(LOGS, 'opencode-error.log'),
+      out_file: path.resolve(LOGS, 'opencode-out.log'),
       merge_logs: true,
     },
   ],

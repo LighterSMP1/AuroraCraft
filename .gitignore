@@ -1,10 +1,44 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 build/
+*.tsbuildinfo
+
+# Environment
 .env
+.env.*
+!.env.example
+
+# Logs & debug
+logs/
 *.log
+debug/
+.cache/
+
+# Test & coverage
+coverage/
+.nyc_output/
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# Editors & IDEs
 .vscode/
 !.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.bak
 *.local
-*.tsbuildinfo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Misc
+*.tgz
+*.py
+prompt.txt
