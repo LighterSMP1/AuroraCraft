@@ -3,13 +3,11 @@ import { AI_MODELS } from '@/types'
 
 const bridges = [
   { name: 'OpenCode', status: 'active' as const, description: 'Open-source AI coding agent with multi-model support' },
-  { name: 'ClaudeCode', status: 'coming_soon' as const, description: "Anthropic's coding assistant" },
   { name: 'Codex', status: 'coming_soon' as const, description: "OpenAI's code generation platform" },
 ]
 
 export default function AdminAIRuntimePage() {
-  const freeModels = AI_MODELS.filter((m) => m.id.startsWith('opencode/'))
-  const futureModels = AI_MODELS.filter((m) => !m.id.startsWith('opencode/'))
+  const freeModels = AI_MODELS
 
   return (
     <div>
@@ -72,22 +70,6 @@ export default function AdminAIRuntimePage() {
               <CheckCircle2 className="h-3 w-3" />
               <span>Active</span>
             </div>
-          </div>
-        ))}
-
-        {futureModels.map((model) => (
-          <div key={model.id} className="rounded-xl border border-border bg-surface p-5 opacity-60">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-text">{model.name}</span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-surface-hover px-2 py-0.5 text-xs text-text-dim">
-                <Clock className="h-3 w-3" />
-                Soon
-              </span>
-            </div>
-            <div className="mt-2">
-              <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] text-text-dim">{model.provider}</span>
-            </div>
-            <p className="mt-2 text-xs text-text-muted">{model.description}</p>
           </div>
         ))}
       </div>

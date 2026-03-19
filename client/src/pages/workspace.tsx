@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import { Link, useParams } from 'react-router'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -18,6 +18,9 @@ import {
   Send,
   Square,
   MessageSquare,
+  MessageCircle,
+  FolderTree,
+  Code2,
   Bot,
   User,
   Loader2,
@@ -32,8 +35,9 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { useProject } from '@/hooks/use-projects'
-import { useAgentSessions, useAgentSession, useStreamingAgent, useProjectFiles } from '@/hooks/use-agent'
+import { useAgentSessions, useAgentSession, useStreamingAgent, useProjectFiles, useFileContent } from '@/hooks/use-agent'
 import { AI_MODELS, DEFAULT_MODEL_ID } from '@/types'
 import type {
   AgentMessage,
@@ -61,7 +65,7 @@ function MarkdownContent({ content }: { content: string }) {
 
 // ── File tree ────────────────────────────────────────────────────────
 
-function FileTreeNode({ entry, depth = 0 }: { entry: FileTreeEntry; depth?: number }) {
+function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile }: { entry: FileTreeEntry; depth?: number; onFileSelect?: (path: string) => void; selectedFile?: string | null }) {
   const [expanded, setExpanded] = useState(depth < 2)
   const pl = depth * 12 + 8
 
@@ -79,26 +83,34 @@ function FileTreeNode({ entry, depth = 0 }: { entry: FileTreeEntry; depth?: numb
           <span className="truncate">{entry.name}</span>
         </button>
         {expanded && entry.children?.map((child) => (
-          <FileTreeNode key={child.path} entry={child} depth={depth + 1} />
+          <FileTreeNode key={child.path} entry={child} depth={depth + 1} onFileSelect={onFileSelect} selectedFile={selectedFile} />
         ))}
       </div>
     )
   }
 
+  const isActive = selectedFile === entry.path
+
   return (
-    <div
-      className="flex items-center gap-1.5 py-1 text-xs text-text-dim hover:bg-surface-hover hover:text-text-muted"
+    <button
+      type="button"
+      onClick={() => onFileSelect?.(entry.path)}
+      className={cn(
+        'flex w-full items-center gap-1.5 py-1 text-xs hover:bg-surface-hover hover:text-text-muted',
+        isActive ? 'bg-primary/10 text-primary font-medium' : 'text-text-dim'
+      )}
       style={{ paddingLeft: pl + 15 }}
+      title={entry.path}
     >
       <File className="h-3.5 w-3.5 shrink-0" />
-      <span className="truncate" title={entry.path}>{entry.name}</span>
-    </div>
+      <span className="truncate">{entry.name}</span>
+    </button>
   )
 }
 
 // ── Static badges (persisted messages) ───────────────────────────────
 
-function FileOpBadge({ part }: { part: Extract<MessagePart, { type: 'file' }> }) {
+function FileOpBadge({ part, onFileSelect }: { part: Extract<MessagePart, { type: 'file' }>; onFileSelect?: (path: string) => void }) {
   const actionConfigs: Record<string, { icon: typeof File; label: string; color: string }> = {
     create: { icon: FilePlus2, label: 'Created', color: 'text-success bg-success/10 border-success/20' },
     update: { icon: FilePenLine, label: 'Updated', color: 'text-[#f97316] bg-[#f97316]/10 border-[#f97316]/20' },
@@ -109,16 +121,25 @@ function FileOpBadge({ part }: { part: Extract<MessagePart, { type: 'file' }> })
   const config = actionConfigs[part.action] ?? { icon: File, label: 'Modified', color: 'text-text-muted bg-surface-hover border-border' }
   const Icon = config.icon
   const filename = part.path.split('/').pop() ?? part.path
+  const isClickable = part.action !== 'delete' && onFileSelect
+  const Wrapper = isClickable ? 'button' : 'div'
 
   return (
-    <div className={cn('inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs', config.color)}>
+    <Wrapper
+      {...(isClickable ? { onClick: () => onFileSelect(part.path), type: 'button' as const } : {})}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs',
+        config.color,
+        isClickable && 'cursor-pointer transition-opacity hover:opacity-80'
+      )}
+    >
       <Icon className="h-3 w-3" />
       <span className="font-medium">{config.label}</span>
       <span className="opacity-75" title={part.path}>{filename}</span>
       {part.action === 'rename' && part.newPath && (
         <span className="opacity-75">→ {part.newPath.split('/').pop()}</span>
       )}
-    </div>
+    </Wrapper>
   )
 }
 
@@ -307,8 +328,6 @@ function StreamingTodoList({ items }: { items: StreamTodoItem[] }) {
 // ── Streaming message (live agent response) ──────────────────────────
 
 function StreamingMessage({ state }: { state: StreamingState }) {
-  const hasContent = state.items.length > 0 || state.todos.length > 0
-
   // Group consecutive file-ops together
   const renderedItems: Array<{ kind: 'thinking' | 'text'; id: string; content?: string; done?: boolean } | { kind: 'file-group'; ops: Array<{ id: string; action: string; path: string; newPath?: string; status: string; tool: string }> }> = []
   
@@ -382,7 +401,7 @@ function StreamingMessage({ state }: { state: StreamingState }) {
 
 // ── Message content (persisted messages) ─────────────────────────────
 
-function MessageContent({ message }: { message: AgentMessage }) {
+function MessageContent({ message, onFileSelect }: { message: AgentMessage; onFileSelect?: (path: string) => void }) {
   const rawParts = message.metadata?.parts
   const parts = Array.isArray(rawParts) ? rawParts : []
 
@@ -425,7 +444,7 @@ function MessageContent({ message }: { message: AgentMessage }) {
             return (
               <div key={`fg-${group.items[0].idx}`} className="flex flex-wrap gap-1.5">
                 {group.items.map(({ part, idx }) => {
-                  if (part.type === 'file') return <FileOpBadge key={`file-${idx}`} part={part} />
+                  if (part.type === 'file') return <FileOpBadge key={`file-${idx}`} part={part} onFileSelect={onFileSelect} />
                   if (part.type === 'tool') return <ToolBadge key={`tool-${idx}`} part={part} />
                   return null
                 })}
@@ -472,8 +491,8 @@ function ModelSelector({ selectedModel, onModelChange, disabled }: {
         onClick={() => !disabled && setOpen(!open)}
         disabled={disabled}
         className={cn(
-          'inline-flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-text-muted transition-colors hover:bg-surface-hover hover:text-text disabled:opacity-50 disabled:pointer-events-none',
-          open && 'bg-surface-hover text-text'
+          'inline-flex items-center gap-1.5 rounded-full bg-surface-hover/50 px-3 py-1 text-xs text-text-dim transition-all hover:bg-surface-hover hover:text-text-muted disabled:opacity-50 disabled:pointer-events-none',
+          open && 'bg-surface-hover text-text-muted ring-1 ring-border-bright'
         )}
       >
         <Cpu className="h-3 w-3 shrink-0" />
@@ -511,7 +530,7 @@ function ModelSelector({ selectedModel, onModelChange, disabled }: {
 
 // ── Chat components ──────────────────────────────────────────────────
 
-function ChatPanel({ projectId, onRefreshFiles }: { projectId: string; onRefreshFiles?: () => void }) {
+function ChatPanel({ projectId, onRefreshFiles, onFileSelect }: { projectId: string; onRefreshFiles?: () => void; onFileSelect?: (path: string) => void }) {
   const { sessions, isLoading: sessionsLoading, createSession } = useAgentSessions(projectId)
 
   const initialSessionId = sessions.length > 0 ? sessions[0].id : null
@@ -546,9 +565,79 @@ function ChatPanel({ projectId, onRefreshFiles }: { projectId: string; onRefresh
       selectedModel={selectedModel}
       onModelChange={setSelectedModel}
       onRefreshFiles={onRefreshFiles}
+      onFileSelect={onFileSelect}
     />
   )
 }
+
+// ── Chat input (isolated to prevent parent re-renders on keystroke) ─
+
+const ChatInput = memo(function ChatInput({ onSend, disabled, isRunning, isCancelling, onCancel, selectedModel, onModelChange, modelDisabled }: {
+  onSend: (message: string) => void
+  disabled?: boolean
+  isRunning?: boolean
+  isCancelling?: boolean
+  onCancel?: () => void
+  selectedModel: string
+  onModelChange: (modelId: string) => void
+  modelDisabled?: boolean
+}) {
+  const [input, setInput] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const handleSend = useCallback(() => {
+    const trimmed = input.trim()
+    if (!trimmed || disabled) return
+    void onSend(trimmed)
+    setInput('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  }, [input, disabled, onSend])
+
+  return (
+    <div className="border-t border-border p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-text-dim/60">Model</span>
+        <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} disabled={modelDisabled} />
+        <span className="ml-auto text-[10px] text-text-dim/40">Ctrl+Enter to send</span>
+      </div>
+      <div className="chatbox-glow flex items-end gap-2 rounded-xl border border-border bg-background p-1.5">
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value)
+            e.target.style.height = 'auto'
+            e.target.style.height = `${e.target.scrollHeight}px`
+          }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleSend() } }}
+          placeholder="Describe your plugin idea..."
+          disabled={disabled}
+          className="flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm text-text placeholder:text-text-dim focus:outline-none disabled:opacity-50 min-h-[44px] max-h-[200px] overflow-y-auto"
+        />
+        {isRunning ? (
+          <button
+            onClick={onCancel}
+            disabled={isCancelling}
+            title="Stop AI"
+            className="shrink-0 rounded-lg bg-destructive p-2.5 text-destructive-foreground transition-colors hover:bg-destructive/80 disabled:opacity-50"
+          >
+            {isCancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={!input.trim() || disabled}
+            title="Send message (Ctrl+Enter)"
+            className="shrink-0 rounded-lg bg-primary p-2.5 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
+          >
+            {disabled ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+})
 
 function ChatEmptyState({ onSessionCreated, createSession, selectedModel, onModelChange }: {
   onSessionCreated: (id: string, message: string) => void
@@ -556,20 +645,7 @@ function ChatEmptyState({ onSessionCreated, createSession, selectedModel, onMode
   selectedModel: string
   onModelChange: (modelId: string) => void
 }) {
-  const [input, setInput] = useState('')
   const [isCreating, setIsCreating] = useState(false)
-
-  const handleSend = async () => {
-    const trimmed = input.trim()
-    if (!trimmed || isCreating) return
-    setIsCreating(true)
-    try {
-      const session = await createSession()
-      onSessionCreated(session.id, trimmed)
-    } catch {
-      setIsCreating(false)
-    }
-  }
 
   return (
     <>
@@ -584,42 +660,21 @@ function ChatEmptyState({ onSessionCreated, createSession, selectedModel, onMode
           </p>
         </div>
       </div>
-      <div className="border-t border-border p-3">
-        {input.trim() && (
-          <div className="mb-2 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-surface-hover/50 px-3 py-2">
-            <MarkdownContent content={input} />
-          </div>
-        )}
-        <div className="flex items-end gap-2">
-          <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} disabled={isCreating} />
-          <textarea
-            rows={1}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              e.target.style.height = 'auto'
-              e.target.style.height = `${e.target.scrollHeight}px`
-            }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void handleSend() } }}
-            placeholder="Describe your plugin idea... (Ctrl+Enter to send)"
-            disabled={isCreating}
-            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50 max-h-[120px] overflow-y-auto"
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isCreating}
-            title="Send message (Ctrl+Enter)"
-            className="rounded-lg bg-primary p-2 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
-          >
-            {isCreating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </button>
-        </div>
-      </div>
+      <ChatInput
+        onSend={(msg) => {
+          setIsCreating(true)
+          createSession().then((session) => onSessionCreated(session.id, msg)).catch(() => setIsCreating(false))
+        }}
+        disabled={isCreating}
+        selectedModel={selectedModel}
+        onModelChange={onModelChange}
+        modelDisabled={isCreating}
+      />
     </>
   )
 }
 
-function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSent, selectedModel, onModelChange, onRefreshFiles }: {
+function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSent, selectedModel, onModelChange, onRefreshFiles, onFileSelect }: {
   projectId: string
   sessionId: string
   pendingMessage?: string | null
@@ -627,14 +682,13 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
   selectedModel: string
   onModelChange: (modelId: string) => void
   onRefreshFiles?: () => void
+  onFileSelect?: (path: string) => void
 }) {
   const { session, messages, isLoading, sendMessage, isSending, sendError, invalidateAndRefetch, cancelSession, isCancelling } = useAgentSession(projectId, sessionId)
   const streamActive = !!projectId && !!sessionId && (!session || session.status === 'idle' || session.status === 'running')
   const { streamingState, isConnected, resetStream } = useStreamingAgent(projectId, sessionId, streamActive)
-  const [input, setInput] = useState('')
   const [awaitingStream, setAwaitingStream] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingSentRef = useRef(false)
   const prevFileChangesRef = useRef(0)
   const prevCompletedOpsRef = useRef(0)
@@ -727,11 +781,8 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
 
   const isRunning = session?.status === 'running'
 
-  const handleSend = useCallback(async () => {
-    const trimmed = input.trim()
-    if (!trimmed || isSending || session?.status === 'running') return
-    setInput('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  const handleSend = useCallback(async (message: string) => {
+    if (!message || isSending || session?.status === 'running') return
     setAwaitingStream(true)
     resetStream()
     streamStartMessageCountRef.current = messagesLenRef.current
@@ -739,11 +790,15 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
     prevFileChangesRef.current = 0
     prevCompletedOpsRef.current = 0
     try {
-      await sendMessage({ content: trimmed, model: selectedModel })
+      await sendMessage({ content: message, model: selectedModel })
     } catch {
       setAwaitingStream(false)
     }
-  }, [input, isSending, sendMessage, selectedModel, session?.status])
+  }, [isSending, sendMessage, selectedModel, session?.status, resetStream])
+
+  const handleCancel = useCallback(() => {
+    cancelSession().catch(() => {})
+  }, [cancelSession])
 
   if (isLoading) {
     return (
@@ -791,7 +846,7 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
                   <p className="text-xs font-medium text-text-muted">
                     {msg.role === 'user' ? 'You' : msg.role === 'system' ? 'System' : 'AI Agent'}
                   </p>
-                  <MessageContent message={msg} />
+                  <MessageContent message={msg} onFileSelect={onFileSelect} />
                 </div>
               </div>
             ))}
@@ -804,61 +859,149 @@ function ChatSession({ projectId, sessionId, pendingMessage, onPendingMessageSen
           </div>
         )}
       </div>
-      <div className="border-t border-border p-3">
+      <div>
         {sendError && (
-          <div className="mb-2 flex items-center gap-1.5 text-xs text-destructive">
+          <div className="px-4 pt-3 flex items-center gap-1.5 text-xs text-destructive">
             <AlertCircle className="h-3 w-3" />
             <span>Failed to send message. Try again.</span>
           </div>
         )}
         {session && session.status !== 'idle' && session.status !== 'running' && (
-          <div className="mb-2 flex items-center gap-1.5 text-xs">
+          <div className="px-4 pt-3 flex items-center gap-1.5 text-xs">
             <AlertCircle className={cn('h-3 w-3', statusColor)} />
             <span className={statusColor}>Session {session.status}</span>
           </div>
         )}
-        {input.trim() && (
-          <div className="mb-2 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-surface-hover/50 px-3 py-2">
-            <MarkdownContent content={input} />
-          </div>
-        )}
-        <div className="flex items-end gap-2">
-          <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} disabled={isSending || session?.status === 'running'} />
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              e.target.style.height = 'auto'
-              e.target.style.height = `${e.target.scrollHeight}px`
-            }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void handleSend() } }}
-            placeholder="Describe your plugin idea... (Ctrl+Enter to send)"
-            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-text placeholder:text-text-dim focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary max-h-[120px] overflow-y-auto"
-          />
-          {isRunning || awaitingStream ? (
-            <button
-              onClick={() => cancelSession().catch(() => {})}
-              disabled={isCancelling}
-              title="Stop AI"
-              className="rounded-lg bg-destructive p-2 text-destructive-foreground transition-colors hover:bg-destructive/80 disabled:opacity-50"
-            >
-              {isCancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-            </button>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || isSending}
-              title="Send message (Ctrl+Enter)"
-              className="rounded-lg bg-primary p-2 text-primary-foreground transition-colors hover:bg-primary-hover disabled:opacity-50"
-            >
-              {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </button>
-          )}
-        </div>
+        <ChatInput
+          onSend={handleSend}
+          disabled={isSending || session?.status === 'running'}
+          isRunning={isRunning || awaitingStream}
+          isCancelling={isCancelling}
+          onCancel={handleCancel}
+          selectedModel={selectedModel}
+          onModelChange={onModelChange}
+          modelDisabled={isSending || session?.status === 'running'}
+        />
       </div>
     </>
+  )
+}
+
+// ── Mobile tab button ────────────────────────────────────────────────
+
+function MobileTabButton({ active, icon: Icon, label, onClick }: {
+  active: boolean
+  icon: typeof MessageCircle
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-medium transition-colors',
+        active ? 'text-primary' : 'text-text-dim hover:text-text-muted'
+      )}
+    >
+      <Icon className="h-5 w-5" />
+      <span>{label}</span>
+      {active && <div className="mt-0.5 h-0.5 w-8 rounded-full bg-primary" />}
+    </button>
+  )
+}
+
+// ── File tree panel (shared between mobile & desktop) ────────────────
+
+function FileTreePanel({ files, filesLoading, refetchFiles, onFileSelect, selectedFile }: {
+  files: FileTreeEntry[]
+  filesLoading: boolean
+  refetchFiles: () => void
+  onFileSelect?: (path: string) => void
+  selectedFile?: string | null
+}) {
+  return (
+    <div className="h-full overflow-y-auto bg-surface py-2">
+      <div className="mb-2 flex items-center justify-between px-3">
+        <p className="text-xs font-medium uppercase tracking-wider text-text-dim">Files</p>
+        <button
+          onClick={() => refetchFiles()}
+          className="rounded p-0.5 text-text-dim hover:text-text-muted"
+          title="Refresh files"
+        >
+          <RefreshCw className="h-3 w-3" />
+        </button>
+      </div>
+      {filesLoading ? (
+        <div className="flex justify-center py-8">
+          <Loader2 className="h-4 w-4 animate-spin text-text-dim" />
+        </div>
+      ) : files.length > 0 ? (
+        <div>
+          {files.map((entry) => (
+            <FileTreeNode key={entry.path} entry={entry} onFileSelect={onFileSelect} selectedFile={selectedFile} />
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
+          <FolderOpen className="h-8 w-8 text-text-dim/50" />
+          <p className="mt-3 text-xs text-text-dim">No files yet</p>
+          <p className="mt-1 text-xs text-text-dim/70">
+            Use the AI assistant to generate your plugin code
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Editor panel (shared between mobile & desktop) ───────────────────
+
+function EditorPanel({ projectId, selectedFile }: { projectId: string; selectedFile: string | null }) {
+  const { content, isLoading, error } = useFileContent(projectId, selectedFile)
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-9 items-center border-b border-border bg-surface px-4">
+        <div className="flex items-center gap-2 text-xs text-text-dim">
+          <File className="h-3 w-3" />
+          {selectedFile ? (
+            <span className="truncate text-text-muted" title={selectedFile}>{selectedFile.split('/').pop()}</span>
+          ) : (
+            'No file selected'
+          )}
+        </div>
+        {selectedFile && (
+          <span className="ml-2 truncate text-[10px] text-text-dim/60" title={selectedFile}>{selectedFile}</span>
+        )}
+      </div>
+      {!selectedFile ? (
+        <div className="flex flex-1 flex-col items-center justify-center text-center">
+          <div className="rounded-2xl bg-primary/5 p-4">
+            <File className="h-8 w-8 text-primary/40" />
+          </div>
+          <p className="mt-4 text-sm font-medium text-text-muted">No file selected</p>
+          <p className="mt-1 max-w-xs text-xs text-text-dim">
+            Select a file from the file tree or click a file badge in the chat to view its contents.
+          </p>
+        </div>
+      ) : isLoading ? (
+        <div className="flex flex-1 items-center justify-center">
+          <Loader2 className="h-5 w-5 animate-spin text-text-dim" />
+        </div>
+      ) : error ? (
+        <div className="flex flex-1 flex-col items-center justify-center text-center">
+          <AlertCircle className="h-6 w-6 text-destructive" />
+          <p className="mt-2 text-sm text-text-muted">Failed to load file</p>
+          <p className="mt-1 text-xs text-text-dim">The file may not exist on disk yet.</p>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto bg-background">
+          <pre className="p-4 text-xs leading-relaxed text-text">
+            <code>{content}</code>
+          </pre>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -868,6 +1011,14 @@ export default function WorkspacePage() {
   const { projectId } = useParams<{ projectId: string }>()
   const { project, isLoading } = useProject(projectId ?? '')
   const { files, isLoading: filesLoading, refetch: refetchFiles } = useProjectFiles(projectId ?? '')
+  const isMobile = useIsMobile()
+  const [mobileTab, setMobileTab] = useState<'chat' | 'files' | 'code'>('chat')
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+
+  const handleFileSelect = useCallback((filePath: string) => {
+    setSelectedFile(filePath)
+    if (isMobile) setMobileTab('code')
+  }, [isMobile])
 
   if (isLoading) {
     return (
@@ -892,10 +1043,45 @@ export default function WorkspacePage() {
     )
   }
 
+  if (isMobile) {
+    return (
+      <div className="flex h-[100dvh] flex-col bg-background">
+        <header className="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface/80 backdrop-blur-sm px-3">
+          <Link to="/dashboard" className="text-text-dim hover:text-text-muted">
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
+          <span className="truncate text-sm font-medium text-text">{project.name}</span>
+          <span className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-[10px] text-text-dim">{project.software}</span>
+        </header>
+
+        <div className="flex-1 overflow-hidden">
+          <div className={cn('flex h-full flex-col', mobileTab !== 'chat' && 'hidden')}>
+            <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
+              <MessageSquare className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium text-text">AI Assistant</span>
+            </div>
+            <ChatPanel projectId={project.id} onRefreshFiles={refetchFiles} onFileSelect={handleFileSelect} />
+          </div>
+          <div className={cn('h-full', mobileTab !== 'files' && 'hidden')}>
+            <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} />
+          </div>
+          <div className={cn('h-full', mobileTab !== 'code' && 'hidden')}>
+            <EditorPanel projectId={project.id} selectedFile={selectedFile} />
+          </div>
+        </div>
+
+        <nav className="flex h-14 shrink-0 items-center justify-around border-t border-border bg-surface" aria-label="Navigation">
+          <MobileTabButton active={mobileTab === 'chat'} icon={MessageCircle} label="Chat" onClick={() => setMobileTab('chat')} />
+          <MobileTabButton active={mobileTab === 'files'} icon={FolderTree} label="Files" onClick={() => setMobileTab('files')} />
+          <MobileTabButton active={mobileTab === 'code'} icon={Code2} label="Code" onClick={() => setMobileTab('code')} />
+        </nav>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-screen flex-col bg-background">
-      {/* Top bar */}
-      <header className="flex h-12 items-center justify-between border-b border-border bg-surface px-4">
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface/80 backdrop-blur-sm px-4">
         <div className="flex items-center gap-3">
           <Link to="/dashboard" className="text-text-dim hover:text-text-muted">
             <ArrowLeft className="h-4 w-4" />
@@ -918,69 +1104,21 @@ export default function WorkspacePage() {
         </div>
       </header>
 
-      {/* Main workspace */}
       <div className="flex flex-1 overflow-hidden">
-        {/* File tree */}
-        <aside className="w-56 shrink-0 overflow-y-auto border-r border-border bg-surface py-2">
-          <div className="mb-2 flex items-center justify-between px-3">
-            <p className="text-xs font-medium uppercase tracking-wider text-text-dim">Files</p>
-            <button
-              onClick={() => refetchFiles()}
-              className="rounded p-0.5 text-text-dim hover:text-text-muted"
-              title="Refresh files"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </button>
-          </div>
-          {filesLoading ? (
-            <div className="flex justify-center py-8">
-              <Loader2 className="h-4 w-4 animate-spin text-text-dim" />
-            </div>
-          ) : files.length > 0 ? (
-            <div>
-              {files.map((entry) => (
-                <FileTreeNode key={entry.path} entry={entry} />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
-              <FolderOpen className="h-8 w-8 text-text-dim/50" />
-              <p className="mt-3 text-xs text-text-dim">No files yet</p>
-              <p className="mt-1 text-xs text-text-dim/70">
-                Use the AI assistant to generate your plugin code
-              </p>
-            </div>
-          )}
+        <aside className="w-56 shrink-0 overflow-hidden border-r border-border">
+          <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} />
         </aside>
 
-        {/* Editor area — empty state */}
         <main className="flex-1 overflow-hidden">
-          <div className="flex h-full flex-col">
-            <div className="flex h-9 items-center border-b border-border bg-surface px-4">
-              <div className="flex items-center gap-2 text-xs text-text-dim">
-                <File className="h-3 w-3" />
-                No file selected
-              </div>
-            </div>
-            <div className="flex flex-1 flex-col items-center justify-center text-center">
-              <div className="rounded-2xl bg-primary/5 p-4">
-                <File className="h-8 w-8 text-primary/40" />
-              </div>
-              <p className="mt-4 text-sm font-medium text-text-muted">No files to display</p>
-              <p className="mt-1 max-w-xs text-xs text-text-dim">
-                Start a conversation with the AI assistant to generate plugin code for your project.
-              </p>
-            </div>
-          </div>
+          <EditorPanel projectId={project.id} selectedFile={selectedFile} />
         </main>
 
-        {/* Chat panel */}
-        <aside className="flex w-80 shrink-0 flex-col border-l border-border bg-surface">
+        <aside className="flex w-[400px] shrink-0 flex-col border-l border-border bg-surface">
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
             <MessageSquare className="h-4 w-4 text-primary" />
             <span className="text-sm font-medium text-text">AI Assistant</span>
           </div>
-          <ChatPanel projectId={project.id} onRefreshFiles={refetchFiles} />
+          <ChatPanel projectId={project.id} onRefreshFiles={refetchFiles} onFileSelect={handleFileSelect} />
         </aside>
       </div>
     </div>

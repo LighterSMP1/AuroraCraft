@@ -15,6 +15,8 @@ const sendMessageSchema = z.object({
   model: z.string().max(100).optional(),
 })
 
+const sessionModelTracker = new Map<string, string>()
+
 async function verifyProjectOwnership(userId: string, projectId: string) {
   const [project] = await db
     .select()
@@ -170,6 +172,21 @@ export async function agentRoutes(app: FastifyInstance) {
         if (!opencodeId || raw.destroyed) return
 
         subscribed = true
+
+        // If the session is still active, send a synthetic running status BEFORE
+        // subscribing (which replays buffered events). This ensures the client sets
+        // activeStream=true before processing any replayed file-op events.
+        // Guards against the buffer overflowing and losing the original status event.
+        const [current] = await db
+          .select({ status: agentSessions.status })
+          .from(agentSessions)
+          .where(eq(agentSessions.id, sessionId))
+          .limit(1)
+
+        if (current && (current.status === 'running' || current.status === 'idle')) {
+          sendSSE({ type: 'status', status: 'running' })
+        }
+
         unsubscribe = opencodeBridge.subscriptionManager.subscribe(
           projectDir,
           opencodeId,
@@ -237,8 +254,19 @@ export async function agentRoutes(app: FastifyInstance) {
     const username = request.user!.username
     const projectDir = getProjectDirectory(username, project.linkId)
 
+    // Track model per session — force new OpenCode session when model changes
+    const requestedModel = parsed.data.model ?? ''
+    const lastModel = sessionModelTracker.get(sessionId)
+    const modelChanged = !!(requestedModel && lastModel && requestedModel !== lastModel)
+    if (requestedModel) sessionModelTracker.set(sessionId, requestedModel)
+
+    if (modelChanged && session.opencodeSessionId) {
+      app.log.info({ sessionId, from: lastModel, to: requestedModel }, 'Model changed — creating new OpenCode session')
+      await db.update(agentSessions).set({ opencodeSessionId: null, updatedAt: new Date() }).where(eq(agentSessions.id, sessionId))
+    }
+
     // Pre-create or resolve the OpenCode session so the SSE endpoint can subscribe immediately
-    let opencodeSessionId = session.opencodeSessionId ?? undefined
+    let opencodeSessionId = modelChanged ? undefined : (session.opencodeSessionId ?? undefined)
     try {
       opencodeSessionId = await opencodeBridge.createOrResolveSession(
         projectDir,

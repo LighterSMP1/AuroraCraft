@@ -221,6 +221,9 @@ function processStreamEvent(acc: StreamAccumulator, event: StreamEvent): void {
         existing.fileStatus = event.status
         existing.fileTool = event.tool
       } else {
+        // Deduplicate: skip if we already have a badge for the same path + action
+        if (acc.items.some((item) => item.kind === 'file-op' && item.filePath === event.path && item.fileAction === event.action)) break
+
         const showRunning = event.status === 'completed' || event.status === 'error'
         const item: StreamingItem = {
           id: event.id,
@@ -341,15 +344,36 @@ export function useStreamingAgent(projectId: string, sessionId: string, isActive
 }
 
 export function useProjectFiles(projectId: string) {
+  const queryClient = useQueryClient()
+
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['projects', projectId, 'files'],
     queryFn: () => api.get<{ files: FileTreeEntry[] }>(`/projects/${projectId}/files`),
     enabled: !!projectId,
   })
 
+  const refetchWithContent = useCallback(() => {
+    void refetch()
+    queryClient.invalidateQueries({ queryKey: ['projects', projectId, 'files', 'content'] })
+  }, [refetch, queryClient, projectId])
+
   return {
     files: data?.files ?? [],
     isLoading,
-    refetch,
+    refetch: refetchWithContent,
+  }
+}
+
+export function useFileContent(projectId: string, filePath: string | null) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['projects', projectId, 'files', 'content', filePath],
+    queryFn: () => api.get<{ content: string; path: string }>(`/projects/${projectId}/files/content?path=${encodeURIComponent(filePath!)}`),
+    enabled: !!projectId && !!filePath,
+  })
+
+  return {
+    content: data?.content ?? null,
+    isLoading,
+    error,
   }
 }

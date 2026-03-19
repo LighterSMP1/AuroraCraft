@@ -237,6 +237,16 @@
   accent-color: var(--color-primary);
 }
 
+/* Chatbox glow effect */
+.chatbox-glow {
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.chatbox-glow:focus-within {
+  box-shadow: 0 0 0 1px var(--color-primary), 0 0 12px -3px rgba(59, 130, 246, 0.3);
+  border-color: var(--color-primary);
+}
+
 /* ── Syntax highlighting (rehype-highlight tokens) ────────────────── */
 
 .hljs-keyword,

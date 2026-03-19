@@ -116,10 +116,9 @@ export interface AIModel {
 
 export const AI_MODELS: AIModel[] = [
   { id: 'opencode/minimax-m2.5-free', name: 'MiniMax M2.5', provider: 'MiniMax', description: 'Free, fast AI model for coding tasks' },
-  { id: 'opencode/mimo-v2-flash-free', name: 'Mimo V2 Flash', provider: 'Mimo', description: 'Free flash model optimized for code generation' },
-  { id: 'opencode/nemotron-3-super-free', name: 'Nemotron 3 Super', provider: 'NVIDIA', description: 'Free NVIDIA model with strong reasoning capabilities' },
-  { id: 'opencode/gpt-5-nano', name: 'GPT-5 Nano', provider: 'OpenAI', description: 'Compact free model with GPT-5 intelligence' },
-  { id: 'opencode/big-pickle', name: 'Big Pickle', provider: 'OpenCode', description: 'Free community model for general coding' },
+  { id: 'opencode/mimo-v2-pro-free', name: 'MiMo V2 Pro', provider: 'Xiaomi', description: 'Free pro model optimized for code generation' },
+  { id: 'opencode/mimo-v2-omni-free', name: 'MiMo V2 Omni', provider: 'Xiaomi', description: 'Free omni model with broad coding capabilities' },
+  { id: 'opencode/nemotron-3-super-free', name: 'Nemotron 3 Super', provider: 'NVIDIA', description: 'Free NVIDIA model with strong reasoning' },
 ]
 
 export const DEFAULT_MODEL_ID = AI_MODELS[0].id

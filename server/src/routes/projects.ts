@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { eq, and, desc } from 'drizzle-orm'
 import crypto from 'crypto'
-import { mkdir, readdir, rm } from 'fs/promises'
+import { mkdir, readdir, readFile, rm, stat } from 'fs/promises'
 import path from 'path'
 import { db } from '../db/index.js'
 import { projects } from '../db/schema/projects.js'
@@ -230,8 +230,52 @@ export async function projectRoutes(app: FastifyInstance) {
 
     const username = request.user!.username
     const projectDir = `/home/auroracraft-${username}/${project.linkId}`
-    const files = await readFileTree(projectDir, projectDir, 6)
+    const files = await readFileTree(projectDir, projectDir, 10)
 
     return { files }
+  })
+
+  // Read file content
+  app.get('/api/projects/:id/files/content', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const { path: filePath } = request.query as { path?: string }
+
+    if (!filePath) {
+      return reply.status(400).send({ message: 'Missing path query parameter', statusCode: 400 })
+    }
+
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
+      .limit(1)
+
+    if (!project) {
+      return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    if (!project.linkId) {
+      return reply.status(404).send({ message: 'Project directory not found', statusCode: 404 })
+    }
+
+    const username = request.user!.username
+    const projectDir = `/home/auroracraft-${username}/${project.linkId}`
+    const fullPath = path.resolve(projectDir, filePath)
+
+    // Security: ensure the resolved path is within the project directory
+    if (!fullPath.startsWith(projectDir + '/')) {
+      return reply.status(403).send({ message: 'Access denied', statusCode: 403 })
+    }
+
+    try {
+      const fileStat = await stat(fullPath)
+      if (!fileStat.isFile()) {
+        return reply.status(400).send({ message: 'Path is not a file', statusCode: 400 })
+      }
+      const content = await readFile(fullPath, 'utf-8')
+      return { content, path: filePath }
+    } catch {
+      return reply.status(404).send({ message: 'File not found', statusCode: 404 })
+    }
   })
 }

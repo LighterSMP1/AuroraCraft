@@ -1,0 +1,5 @@
+{
+  "name": "AuroraCraft",
+  "postStartCommand": "cd /workspaces/AuroraCraft && npm install && pm2 start ecosystem.config.cjs && pm2 save",
+  "forwardPorts": [3000, 5173]
+}

@@ -228,10 +228,9 @@ class SSEConnection {
 
     for (const streamEvent of streamEvents) {
       if (sessionId) {
-        // Buffer non-terminal, non-transient events for late-joining listeners (e.g. SSE endpoint)
+        // Buffer non-terminal events for late-joining listeners (e.g. SSE endpoint after page refresh)
         // 'complete' is a terminal signal that should only be dispatched live, never replayed
-        // 'file-op' events are transient UI indicators and must not be replayed to avoid ghost badges
-        if (streamEvent.type !== 'complete' && streamEvent.type !== 'file-op') {
+        if (streamEvent.type !== 'complete') {
           let buffer = this.eventBuffer.get(sessionId)
           if (!buffer) {
             buffer = []
@@ -337,19 +336,13 @@ class SSEConnection {
           sessionID?: string
           diff?: Array<{ file?: string; status?: string; additions?: number; deletions?: number }>
         }
+        // Emit file-change events (triggers file tree refresh) instead of file-op events
+        // (which would create duplicate badges alongside the tool-call-based badges)
         for (const entry of props.diff ?? []) {
           if (!entry.file) continue
-          let action: string
-          if (entry.status === 'added') action = 'create'
-          else if (entry.status === 'deleted') action = 'delete'
-          else action = 'update'
           events.push({
-            type: 'file-op',
-            id: entry.file,
-            action,
-            path: this.makeRelativePath(entry.file),
-            status: 'completed',
-            tool: 'session.diff',
+            type: 'file-change',
+            file: this.makeRelativePath(entry.file),
           })
         }
         return { sessionId: props.sessionID ?? null, streamEvents: events }
@@ -438,8 +431,8 @@ class SSEConnection {
   }
 
   private dispatchToSession(sessionId: string, event: StreamEvent) {
-    // Buffer non-terminal, non-transient events for late-joining listeners
-    if (event.type !== 'complete' && event.type !== 'file-op') {
+    // Buffer non-terminal events for late-joining listeners
+    if (event.type !== 'complete') {
       let buffer = this.eventBuffer.get(sessionId)
       if (!buffer) {
         buffer = []
