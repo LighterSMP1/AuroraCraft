@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { eq, and, desc } from 'drizzle-orm'
 import crypto from 'crypto'
-import { mkdir, readdir, readFile, rm, stat } from 'fs/promises'
+import { mkdir, readdir, readFile, writeFile, rm, stat, rename as fsRename } from 'fs/promises'
 import path from 'path'
 import { db } from '../db/index.js'
 import { projects } from '../db/schema/projects.js'
@@ -277,5 +277,187 @@ export async function projectRoutes(app: FastifyInstance) {
     } catch {
       return reply.status(404).send({ message: 'File not found', statusCode: 404 })
     }
+  })
+
+  // Save/write file content
+  app.put('/api/projects/:id/files/content', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const parsed = z.object({ path: z.string().min(1), content: z.string() }).safeParse(request.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ message: parsed.error.issues[0].message, statusCode: 400 })
+    }
+
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
+      .limit(1)
+
+    if (!project) {
+      return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    if (!project.linkId) {
+      return reply.status(404).send({ message: 'Project directory not found', statusCode: 404 })
+    }
+
+    const username = request.user!.username
+    const projectDir = `/home/auroracraft-${username}/${project.linkId}`
+    const fullPath = path.resolve(projectDir, parsed.data.path)
+
+    if (!fullPath.startsWith(projectDir + '/')) {
+      return reply.status(403).send({ message: 'Access denied', statusCode: 403 })
+    }
+
+    try {
+      await mkdir(path.dirname(fullPath), { recursive: true })
+      await writeFile(fullPath, parsed.data.content, 'utf-8')
+    } catch (err) {
+      app.log.error({ err, path: parsed.data.path }, 'Failed to write file')
+      return reply.status(500).send({ message: 'Failed to write file', statusCode: 500 })
+    }
+
+    return { success: true, path: parsed.data.path }
+  })
+
+  // Create file or folder
+  app.post('/api/projects/:id/files/create', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const parsed = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) }).safeParse(request.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ message: parsed.error.issues[0].message, statusCode: 400 })
+    }
+
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
+      .limit(1)
+
+    if (!project) {
+      return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    if (!project.linkId) {
+      return reply.status(404).send({ message: 'Project directory not found', statusCode: 404 })
+    }
+
+    const username = request.user!.username
+    const projectDir = `/home/auroracraft-${username}/${project.linkId}`
+    const fullPath = path.resolve(projectDir, parsed.data.path)
+
+    if (!fullPath.startsWith(projectDir + '/')) {
+      return reply.status(403).send({ message: 'Access denied', statusCode: 403 })
+    }
+
+    try {
+      await stat(fullPath)
+      return reply.status(409).send({ message: `${parsed.data.type === 'directory' ? 'Folder' : 'File'} already exists at ${parsed.data.path}`, statusCode: 409 })
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+
+    try {
+      if (parsed.data.type === 'directory') {
+        await mkdir(fullPath, { recursive: true })
+      } else {
+        await mkdir(path.dirname(fullPath), { recursive: true })
+        await writeFile(fullPath, '', 'utf-8')
+      }
+    } catch (err) {
+      app.log.error({ err, path: parsed.data.path }, 'Failed to create file/folder')
+      return reply.status(500).send({ message: 'Failed to create file/folder', statusCode: 500 })
+    }
+
+    return reply.status(201).send({ success: true, path: parsed.data.path, type: parsed.data.type })
+  })
+
+  // Delete file or folder
+  app.delete('/api/projects/:id/files/delete', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const parsed = z.object({ path: z.string().min(1) }).safeParse(request.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ message: parsed.error.issues[0].message, statusCode: 400 })
+    }
+
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
+      .limit(1)
+
+    if (!project) {
+      return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    if (!project.linkId) {
+      return reply.status(404).send({ message: 'Project directory not found', statusCode: 404 })
+    }
+
+    const username = request.user!.username
+    const projectDir = `/home/auroracraft-${username}/${project.linkId}`
+    const fullPath = path.resolve(projectDir, parsed.data.path)
+
+    if (!fullPath.startsWith(projectDir + '/') || fullPath === projectDir) {
+      return reply.status(403).send({ message: 'Access denied', statusCode: 403 })
+    }
+
+    try {
+      await rm(fullPath, { recursive: true, force: true })
+    } catch (err) {
+      app.log.error({ err, path: parsed.data.path }, 'Failed to delete file/folder')
+      return reply.status(500).send({ message: 'Failed to delete file/folder', statusCode: 500 })
+    }
+
+    return reply.status(204).send()
+  })
+
+  // Rename file or folder
+  app.post('/api/projects/:id/files/rename', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const parsed = z.object({ oldPath: z.string().min(1), newPath: z.string().min(1) }).safeParse(request.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ message: parsed.error.issues[0].message, statusCode: 400 })
+    }
+
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.userId, request.user!.id)))
+      .limit(1)
+
+    if (!project) {
+      return reply.status(404).send({ message: 'Project not found', statusCode: 404 })
+    }
+
+    if (!project.linkId) {
+      return reply.status(404).send({ message: 'Project directory not found', statusCode: 404 })
+    }
+
+    const username = request.user!.username
+    const projectDir = `/home/auroracraft-${username}/${project.linkId}`
+    const oldFullPath = path.resolve(projectDir, parsed.data.oldPath)
+    const newFullPath = path.resolve(projectDir, parsed.data.newPath)
+
+    if (!oldFullPath.startsWith(projectDir + '/') || !newFullPath.startsWith(projectDir + '/')) {
+      return reply.status(403).send({ message: 'Access denied', statusCode: 403 })
+    }
+
+    try {
+      await stat(newFullPath)
+      return reply.status(409).send({ message: `A file or folder already exists at ${parsed.data.newPath}`, statusCode: 409 })
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+
+    try {
+      await mkdir(path.dirname(newFullPath), { recursive: true })
+      await fsRename(oldFullPath, newFullPath)
+    } catch (err) {
+      app.log.error({ err, oldPath: parsed.data.oldPath, newPath: parsed.data.newPath }, 'Failed to rename file/folder')
+      return reply.status(500).send({ message: 'Failed to rename file/folder', statusCode: 500 })
+    }
+
+    return { success: true, oldPath: parsed.data.oldPath, newPath: parsed.data.newPath }
   })
 }

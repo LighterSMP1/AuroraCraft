@@ -33,11 +33,17 @@ import {
   ListTodo,
   Cpu,
   RefreshCw,
+  FolderPlus,
+  Pencil,
+  Trash2,
+  Save,
 } from 'lucide-react'
+import Editor from '@monaco-editor/react'
 import { cn } from '@/lib/utils'
+import type { AxiosError } from 'axios'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useProject } from '@/hooks/use-projects'
-import { useAgentSessions, useAgentSession, useStreamingAgent, useProjectFiles, useFileContent } from '@/hooks/use-agent'
+import { useAgentSessions, useAgentSession, useStreamingAgent, useProjectFiles, useFileContent, useFileOperations } from '@/hooks/use-agent'
 import { AI_MODELS, DEFAULT_MODEL_ID } from '@/types'
 import type {
   AgentMessage,
@@ -49,6 +55,11 @@ import type {
   StreamTodoItem,
   StreamingState,
 } from '@/types'
+
+function getErrorMessage(err: unknown): string {
+  const axErr = err as AxiosError<{ message?: string }>
+  return axErr?.response?.data?.message ?? 'An unexpected error occurred'
+}
 
 // ── Markdown renderer ────────────────────────────────────────────────
 
@@ -65,9 +76,60 @@ function MarkdownContent({ content }: { content: string }) {
 
 // ── File tree ────────────────────────────────────────────────────────
 
-function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile }: { entry: FileTreeEntry; depth?: number; onFileSelect?: (path: string) => void; selectedFile?: string | null }) {
+function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile, fileOps }: { entry: FileTreeEntry; depth?: number; onFileSelect?: (path: string) => void; selectedFile?: string | null; fileOps?: ReturnType<typeof useFileOperations> }) {
   const [expanded, setExpanded] = useState(depth < 2)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const pl = depth * 12 + 8
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = () => setContextMenu(null)
+    document.addEventListener('click', handler)
+    document.addEventListener('contextmenu', handler)
+    return () => {
+      document.removeEventListener('click', handler)
+      document.removeEventListener('contextmenu', handler)
+    }
+  }, [contextMenu])
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }, [])
+
+  const handleRename = useCallback(() => {
+    const newName = window.prompt('New name:', entry.name)
+    if (!newName || newName === entry.name) return
+    const parentDir = entry.path.includes('/') ? entry.path.substring(0, entry.path.lastIndexOf('/')) : ''
+    const newPath = parentDir ? `${parentDir}/${newName}` : newName
+    fileOps?.renameFile({ oldPath: entry.path, newPath }).catch((err) => { window.alert(getErrorMessage(err)) })
+  }, [entry.path, entry.name, fileOps])
+
+  const handleDelete = useCallback(() => {
+    if (!window.confirm(`Delete ${entry.path}?`)) return
+    fileOps?.deleteFile({ path: entry.path }).catch((err) => { window.alert(getErrorMessage(err)) })
+  }, [entry.path, fileOps])
+
+  const contextMenuEl = contextMenu && (
+    <div
+      className="fixed z-50 min-w-[140px] rounded-lg border border-border bg-surface py-1 shadow-lg"
+      style={{ left: contextMenu.x, top: contextMenu.y }}
+    >
+      <button
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:bg-surface-hover hover:text-text"
+        onClick={handleRename}
+      >
+        <Pencil className="h-3 w-3" /> Rename
+      </button>
+      <button
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-surface-hover"
+        onClick={handleDelete}
+      >
+        <Trash2 className="h-3 w-3" /> Delete
+      </button>
+    </div>
+  )
 
   if (entry.type === 'directory') {
     const DirIcon = expanded ? FolderOpen : Folder
@@ -75,6 +137,7 @@ function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile }: { entry:
       <div>
         <button
           onClick={() => setExpanded(!expanded)}
+          onContextMenu={handleContextMenu}
           className="flex w-full items-center gap-1.5 py-1 text-xs text-text-muted hover:bg-surface-hover hover:text-text"
           style={{ paddingLeft: pl }}
         >
@@ -83,8 +146,9 @@ function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile }: { entry:
           <span className="truncate">{entry.name}</span>
         </button>
         {expanded && entry.children?.map((child) => (
-          <FileTreeNode key={child.path} entry={child} depth={depth + 1} onFileSelect={onFileSelect} selectedFile={selectedFile} />
+          <FileTreeNode key={child.path} entry={child} depth={depth + 1} onFileSelect={onFileSelect} selectedFile={selectedFile} fileOps={fileOps} />
         ))}
+        {contextMenuEl}
       </div>
     )
   }
@@ -92,19 +156,23 @@ function FileTreeNode({ entry, depth = 0, onFileSelect, selectedFile }: { entry:
   const isActive = selectedFile === entry.path
 
   return (
-    <button
-      type="button"
-      onClick={() => onFileSelect?.(entry.path)}
-      className={cn(
-        'flex w-full items-center gap-1.5 py-1 text-xs hover:bg-surface-hover hover:text-text-muted',
-        isActive ? 'bg-primary/10 text-primary font-medium' : 'text-text-dim'
-      )}
-      style={{ paddingLeft: pl + 15 }}
-      title={entry.path}
-    >
-      <File className="h-3.5 w-3.5 shrink-0" />
-      <span className="truncate">{entry.name}</span>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => onFileSelect?.(entry.path)}
+        onContextMenu={handleContextMenu}
+        className={cn(
+          'flex w-full items-center gap-1.5 py-1 text-xs hover:bg-surface-hover hover:text-text-muted',
+          isActive ? 'bg-primary/10 text-primary font-medium' : 'text-text-dim'
+        )}
+        style={{ paddingLeft: pl + 15 }}
+        title={entry.path}
+      >
+        <File className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{entry.name}</span>
+      </button>
+      {contextMenuEl}
+    </>
   )
 }
 
@@ -912,24 +980,47 @@ function MobileTabButton({ active, icon: Icon, label, onClick }: {
 
 // ── File tree panel (shared between mobile & desktop) ────────────────
 
-function FileTreePanel({ files, filesLoading, refetchFiles, onFileSelect, selectedFile }: {
+function FileTreePanel({ files, filesLoading, refetchFiles, onFileSelect, selectedFile, fileOps }: {
   files: FileTreeEntry[]
   filesLoading: boolean
   refetchFiles: () => void
   onFileSelect?: (path: string) => void
   selectedFile?: string | null
+  fileOps: ReturnType<typeof useFileOperations>
 }) {
   return (
     <div className="h-full overflow-y-auto bg-surface py-2">
       <div className="mb-2 flex items-center justify-between px-3">
         <p className="text-xs font-medium uppercase tracking-wider text-text-dim">Files</p>
-        <button
-          onClick={() => refetchFiles()}
-          className="rounded p-0.5 text-text-dim hover:text-text-muted"
-          title="Refresh files"
-        >
-          <RefreshCw className="h-3 w-3" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => {
+              const name = window.prompt('File path (relative):')
+              if (name) fileOps.createFile({ path: name, type: 'file' }).catch((err) => { window.alert(getErrorMessage(err)) })
+            }}
+            className="rounded p-0.5 text-text-dim hover:text-text-muted"
+            title="New file"
+          >
+            <FilePlus2 className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => {
+              const name = window.prompt('Folder path (relative):')
+              if (name) fileOps.createFile({ path: name, type: 'directory' }).catch((err) => { window.alert(getErrorMessage(err)) })
+            }}
+            className="rounded p-0.5 text-text-dim hover:text-text-muted"
+            title="New folder"
+          >
+            <FolderPlus className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => refetchFiles()}
+            className="rounded p-0.5 text-text-dim hover:text-text-muted"
+            title="Refresh files"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
+        </div>
       </div>
       {filesLoading ? (
         <div className="flex justify-center py-8">
@@ -938,7 +1029,7 @@ function FileTreePanel({ files, filesLoading, refetchFiles, onFileSelect, select
       ) : files.length > 0 ? (
         <div>
           {files.map((entry) => (
-            <FileTreeNode key={entry.path} entry={entry} onFileSelect={onFileSelect} selectedFile={selectedFile} />
+            <FileTreeNode key={entry.path} entry={entry} onFileSelect={onFileSelect} selectedFile={selectedFile} fileOps={fileOps} />
           ))}
         </div>
       ) : (
@@ -956,22 +1047,88 @@ function FileTreePanel({ files, filesLoading, refetchFiles, onFileSelect, select
 
 // ── Editor panel (shared between mobile & desktop) ───────────────────
 
-function EditorPanel({ projectId, selectedFile }: { projectId: string; selectedFile: string | null }) {
+function getLanguageFromPath(filePath: string): string {
+  if (filePath.endsWith('.gradle.kts')) return 'kotlin'
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+  const map: Record<string, string> = {
+    java: 'java', kt: 'kotlin', kts: 'kotlin',
+    js: 'javascript', jsx: 'javascriptreact', ts: 'typescript', tsx: 'typescriptreact',
+    json: 'json', xml: 'xml', html: 'html', css: 'css', scss: 'scss',
+    md: 'markdown', txt: 'plaintext',
+    yaml: 'yaml', yml: 'yaml',
+    gradle: 'groovy',
+    py: 'python', rb: 'ruby', rs: 'rust', go: 'go',
+    sh: 'shell', bash: 'shell', zsh: 'shell',
+    sql: 'sql', graphql: 'graphql',
+    properties: 'ini', toml: 'ini', cfg: 'ini',
+    dockerfile: 'dockerfile',
+    c: 'c', cpp: 'cpp', h: 'cpp', hpp: 'cpp',
+  }
+  return map[ext] ?? 'plaintext'
+}
+
+function EditorPanel({ projectId, selectedFile, fileOps }: { projectId: string; selectedFile: string | null; fileOps: ReturnType<typeof useFileOperations> }) {
   const { content, isLoading, error } = useFileContent(projectId, selectedFile)
+  const [editedContent, setEditedContent] = useState<string | null>(null)
+
+  const hasUnsavedChanges = editedContent !== null && editedContent !== content
+
+  useEffect(() => {
+    setEditedContent(null)
+  }, [selectedFile])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault()
+        if (selectedFile && hasUnsavedChanges && !fileOps.isSaving) {
+          fileOps.saveFile({ path: selectedFile, content: editedContent ?? content ?? '' })
+            .then(() => setEditedContent(null))
+            .catch((err) => { window.alert(getErrorMessage(err)) })
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selectedFile, hasUnsavedChanges, fileOps, editedContent, content])
+
+  const handleSave = useCallback(() => {
+    if (!selectedFile || !hasUnsavedChanges || fileOps.isSaving) return
+    fileOps.saveFile({ path: selectedFile, content: editedContent ?? content ?? '' })
+      .then(() => setEditedContent(null))
+      .catch((err) => { window.alert(getErrorMessage(err)) })
+  }, [selectedFile, hasUnsavedChanges, fileOps, editedContent, content])
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-9 items-center border-b border-border bg-surface px-4">
-        <div className="flex items-center gap-2 text-xs text-text-dim">
-          <File className="h-3 w-3" />
+      <div className="flex h-9 items-center justify-between border-b border-border bg-surface px-4">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-text-dim">
+          <File className="h-3 w-3 shrink-0" />
           {selectedFile ? (
             <span className="truncate text-text-muted" title={selectedFile}>{selectedFile.split('/').pop()}</span>
           ) : (
             'No file selected'
           )}
+          {selectedFile && (
+            <span className="truncate text-[10px] text-text-dim/60" title={selectedFile}>{selectedFile}</span>
+          )}
+          {hasUnsavedChanges && (
+            <span className="flex shrink-0 items-center gap-1 text-[10px] text-warning">
+              <span className="h-1.5 w-1.5 rounded-full bg-warning" />
+              Unsaved
+            </span>
+          )}
         </div>
-        {selectedFile && (
-          <span className="ml-2 truncate text-[10px] text-text-dim/60" title={selectedFile}>{selectedFile}</span>
+        {selectedFile && hasUnsavedChanges && (
+          <button
+            onClick={handleSave}
+            disabled={fileOps.isSaving}
+            className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20 disabled:opacity-50"
+            title="Save (Ctrl+S)"
+          >
+            {fileOps.isSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            Save
+          </button>
         )}
       </div>
       {!selectedFile ? (
@@ -995,11 +1152,29 @@ function EditorPanel({ projectId, selectedFile }: { projectId: string; selectedF
           <p className="mt-1 text-xs text-text-dim">The file may not exist on disk yet.</p>
         </div>
       ) : (
-        <div className="flex-1 overflow-auto bg-background">
-          <pre className="p-4 text-xs leading-relaxed text-text">
-            <code>{content}</code>
-          </pre>
-        </div>
+        <Editor
+          height="100%"
+          theme="vs-dark"
+          language={getLanguageFromPath(selectedFile)}
+          value={editedContent ?? content ?? ''}
+          onChange={(value) => {
+            const v = value ?? ''
+            if (v !== content) setEditedContent(v)
+          }}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 13,
+            fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            wordWrap: 'on',
+            padding: { top: 12 },
+            renderLineHighlight: 'line',
+            cursorBlinking: 'smooth',
+            smoothScrolling: true,
+            bracketPairColorization: { enabled: true },
+          }}
+        />
       )}
     </div>
   )
@@ -1014,6 +1189,7 @@ export default function WorkspacePage() {
   const isMobile = useIsMobile()
   const [mobileTab, setMobileTab] = useState<'chat' | 'files' | 'code'>('chat')
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const fileOps = useFileOperations(projectId ?? '')
 
   const handleFileSelect = useCallback((filePath: string) => {
     setSelectedFile(filePath)
@@ -1063,10 +1239,10 @@ export default function WorkspacePage() {
             <ChatPanel projectId={project.id} onRefreshFiles={refetchFiles} onFileSelect={handleFileSelect} />
           </div>
           <div className={cn('h-full', mobileTab !== 'files' && 'hidden')}>
-            <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} />
+            <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} fileOps={fileOps} />
           </div>
           <div className={cn('h-full', mobileTab !== 'code' && 'hidden')}>
-            <EditorPanel projectId={project.id} selectedFile={selectedFile} />
+            <EditorPanel projectId={project.id} selectedFile={selectedFile} fileOps={fileOps} />
           </div>
         </div>
 
@@ -1106,11 +1282,11 @@ export default function WorkspacePage() {
 
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-56 shrink-0 overflow-hidden border-r border-border">
-          <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} />
+          <FileTreePanel files={files} filesLoading={filesLoading} refetchFiles={refetchFiles} onFileSelect={handleFileSelect} selectedFile={selectedFile} fileOps={fileOps} />
         </aside>
 
         <main className="flex-1 overflow-hidden">
-          <EditorPanel projectId={project.id} selectedFile={selectedFile} />
+          <EditorPanel projectId={project.id} selectedFile={selectedFile} fileOps={fileOps} />
         </main>
 
         <aside className="flex w-[400px] shrink-0 flex-col border-l border-border bg-surface">

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { api, apiClient } from '@/lib/api'
 import type {
   AgentSession,
   AgentSessionWithMessages,
@@ -375,5 +375,49 @@ export function useFileContent(projectId: string, filePath: string | null) {
     content: data?.content ?? null,
     isLoading,
     error,
+  }
+}
+
+export function useFileOperations(projectId: string) {
+  const queryClient = useQueryClient()
+
+  const invalidateFiles = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['projects', projectId, 'files'] })
+    queryClient.invalidateQueries({ queryKey: ['projects', projectId, 'files', 'content'] })
+  }, [queryClient, projectId])
+
+  const createMutation = useMutation({
+    mutationFn: ({ path, type }: { path: string; type: 'file' | 'directory' }) =>
+      api.post<{ success: boolean; path: string; type: string }>(`/projects/${projectId}/files/create`, { path, type }),
+    onSuccess: () => invalidateFiles(),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: ({ path }: { path: string }) =>
+      apiClient.delete(`/projects/${projectId}/files/delete`, { data: { path } }).then(() => undefined),
+    onSuccess: () => invalidateFiles(),
+  })
+
+  const renameMutation = useMutation({
+    mutationFn: ({ oldPath, newPath }: { oldPath: string; newPath: string }) =>
+      api.post<{ success: boolean; oldPath: string; newPath: string }>(`/projects/${projectId}/files/rename`, { oldPath, newPath }),
+    onSuccess: () => invalidateFiles(),
+  })
+
+  const saveMutation = useMutation({
+    mutationFn: ({ path, content }: { path: string; content: string }) =>
+      api.put<{ success: boolean; path: string }>(`/projects/${projectId}/files/content`, { path, content }),
+    onSuccess: () => invalidateFiles(),
+  })
+
+  return {
+    createFile: createMutation.mutateAsync,
+    isCreating: createMutation.isPending,
+    deleteFile: deleteMutation.mutateAsync,
+    isDeleting: deleteMutation.isPending,
+    renameFile: renameMutation.mutateAsync,
+    isRenaming: renameMutation.isPending,
+    saveFile: saveMutation.mutateAsync,
+    isSaving: saveMutation.isPending,
   }
 }
